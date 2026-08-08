@@ -296,7 +296,7 @@ preprocess_configs = {"ser_tab": RunConfig(use_serialized_tables=True),
 base_config = RunConfig(
     parallel_requests=10,
     submission_file=True,
-    pipeline_details="Custom pdf parsing + vDB + Router + SO CoT; llm = GPT-4o-mini",
+    pipeline_details="Custom pdf parsing + vDB + Router + SO CoT; llm = qwen-turbo",
     config_suffix="_base"
 )
 
@@ -304,8 +304,8 @@ parent_document_retrieval_config = RunConfig(
     parent_document_retrieval=True,
     parallel_requests=20,
     submission_file=True,
-    pipeline_details="Custom pdf parsing + vDB + Router + Parent Document Retrieval + SO CoT; llm = GPT-4o",
-    answering_model="gpt-4o-2024-08-06",
+    pipeline_details="Custom pdf parsing + vDB + Router + Parent Document Retrieval + SO CoT; llm = qwen-turbo",
+    answering_model="qwen-turbo",
     config_suffix="_pdr"
 )
 

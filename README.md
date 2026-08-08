@@ -139,9 +139,9 @@ streamlit run app_streamlit.py
 
 | 配置名 | 说明 |
 | --- | --- |
-| `base` | 基础配置：向量检索 + GPT-4o-mini |
-| `pdr` | 启用父文档检索，使用 GPT-4o |
-| `max` | 推荐最佳配置：向量检索 + 父文档检索 + LLM 重排 + qwen-turbo |
+| `base` | 基础配置：向量检索 + 通义千问（qwen-turbo） |
+| `pdr` | 启用父文档检索（代码中模型名配置为 GPT-4o，需配合 OpenAI 提供商使用） |
+| `max` | 推荐最佳配置：向量检索 + 父文档检索 + LLM 重排 + 通义千问（qwen-turbo） |
 
 另有表格序列化配置：`ser_tab`（使用 LLM 序列化表格）/ `no_ser_tab`（不使用）。
 
