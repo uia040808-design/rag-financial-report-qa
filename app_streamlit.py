@@ -43,21 +43,28 @@ if submit_btn and user_question.strip():
             else:
                 answer_dict = answer
             # 直接取返回结果中的顶层字段
-            # 实际返回结构：step_by_step_analysis / reasoning_summary / relevant_pages / final_answer / references
+            # 实际返回结构：step_by_step_analysis / reasoning_summary /
+            #              relevant_quotes / relevant_pages / final_answer / references
             step_by_step = answer_dict.get("step_by_step_analysis", "-")
             reasoning_summary = answer_dict.get("reasoning_summary", "-")
+            relevant_quotes = answer_dict.get("relevant_quotes", [])
             relevant_pages = answer_dict.get("relevant_pages", [])
             final_answer = answer_dict.get("final_answer", "-")
             references = answer_dict.get("references", [])
             # 打印调试
             print("[DEBUG] step_by_step_analysis:", step_by_step)
             print("[DEBUG] reasoning_summary:", reasoning_summary)
+            print("[DEBUG] relevant_quotes:", relevant_quotes)
             print("[DEBUG] relevant_pages:", relevant_pages)
             print("[DEBUG] final_answer:", final_answer)
             st.markdown("**分步推理：**")
             st.info(step_by_step)
             st.markdown("**推理摘要：**")
             st.success(reasoning_summary)
+            if relevant_quotes:
+                st.markdown("**引用原文：**")
+                for q in relevant_quotes:
+                    st.markdown(f"> {q}")
             st.markdown("**相关页面：** ")
             st.write(relevant_pages)
             if references:

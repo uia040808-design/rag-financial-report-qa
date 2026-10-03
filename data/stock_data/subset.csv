@@ -1,2 +1,10 @@
-sha1,file_name,company_name
-stock_10001,���Ʊ�����о���ʣ���о����2024����ȱ���,��о����
+﻿sha1,file_name,company_name,source_kind,n_pages_pdf
+da8dcb1247c198767151564c9570d2cc87940d12,【上海证券】中芯国际深度研究报告：晶圆制造龙头，领航国产芯片新征程,中芯国际,broker_report,29
+610f37232fec97c0427328bba44b7d27e4871cfc,【东方证券】产能利用率提升，持续推进工艺迭代和产品性能升级,中芯国际,broker_report,6
+aff217e90c5d4835a7478fe097a484232debe201,【中原证券】产能利用率显著提升，持续推进工艺迭代升级——中芯国际(688981)季报点评,中芯国际,broker_report,5
+711fc6a36111b81703e9c423a2505d8c268fb786,【光大证券】中芯国际2025年一季度业绩点评：1Q突发生产问题，2Q业绩有望筑底，自主可控趋势不改,中芯国际,broker_report,8
+dca79e6a459cabb924d9abfd0b9686087f6d1001,【兴证国际】季度盈利低于预期，看好国产芯片长期空间,中芯国际,broker_report,5
+e9a6df06c6330601d4f40a327b135060fad01743,【华泰证券】中芯国际（688981）：上调港股目标价到63港币，看好DeepSeek推动代工需求强劲增长,中芯国际,broker_report,12
+b17d897c417c27b05498aac8e0161c283b96e1a1,【国信证券】工业与汽车触底反弹，良率影响短期营收,中芯国际,broker_report,6
+5f75d0f5b4ad244a58da628c622d7209f22ccac3,【财报】中芯国际：中芯国际2024年年度报告,中芯国际,annual_report,222
+2ff29ca714275a517249e4d28bf3082a55059f44,中芯国际机构调研纪要,中芯国际,research_minutes,22

@@ -9,12 +9,24 @@ from openai.lib._parsing import type_to_response_format_param
 import tiktoken
 import src.prompts as prompts
 import requests
+from src.structured_output import parse_structured_output, build_schema_instruction
 from json_repair import repair_json
 from pydantic import BaseModel
 import google.generativeai as genai
 from copy import deepcopy
-from tenacity import retry, stop_after_attempt, wait_fixed
+from tenacity import (retry, stop_after_attempt, wait_fixed, wait_exponential,
+                        retry_if_exception_type)
 import dashscope
+from src.env_loader import load_project_env, generation_model
+from src.dashscope_errors import (
+    DashScopeError,
+    DashScopeThrottled,
+    raise_if_api_error,
+)
+
+# 结构化答案必须具备的字段。各 schema 的字段名一致，只有 relevant_quotes 是
+# 引文式引用后新增的；relevant_pages 仍在（由引文解析回填）。
+REQUIRED_ANSWER_FIELDS = ("step_by_step_analysis", "reasoning_summary", "relevant_quotes")
 
 # OpenAI基础处理器，封装了消息发送、结构化输出、计费等逻辑
 class BaseOpenaiProcessor:
@@ -25,7 +37,7 @@ class BaseOpenaiProcessor:
 
     def set_up_llm(self):
         # 加载OpenAI API密钥，初始化LLM
-        load_dotenv()
+        load_project_env()
         llm = OpenAI(
             api_key=os.getenv("OPENAI_API_KEY"),
             timeout=None,
@@ -88,7 +100,7 @@ class BaseOpenaiProcessor:
 # IBM API基础处理器，支持余额查询、模型列表、嵌入、消息发送等
 class BaseIBMAPIProcessor:
     def __init__(self):
-        load_dotenv()
+        load_project_env()
         self.api_token = os.getenv("IBM_API_KEY")
         self.base_url = "https://rag.timetoact.at/ibm"
         self.default_model = 'meta-llama/llama-3-3-70b-instruct'
@@ -246,7 +258,7 @@ class BaseGeminiProcessor:
         # self.default_model = "gemini-2.0-flash-thinking-exp-01-21",
         
     def _set_up_llm(self):
-        load_dotenv()
+        load_project_env()
         api_key = os.getenv("GEMINI_API_KEY")
         genai.configure(api_key=api_key)
         return genai
@@ -422,48 +434,51 @@ class APIProcessor:
         )
         self.response_data = self.processor.response_data
         
-        # 检查返回的字典是否包含所需的字段，如果不是dashscope则进行兜底
-        if not isinstance(answer_dict, dict) or 'step_by_step_analysis' not in answer_dict:
-            # 如果是dashscope返回的基本格式，尝试保留其内容
-            if isinstance(answer_dict, dict) and 'final_answer' in answer_dict:
-                # 这是dashscope处理后的格式，尝试从final_answer中提取结构化信息
-                final_answer_content = answer_dict.get("final_answer", "N/A")
-                
-                # 如果final_answer是字符串且包含结构化信息，尝试解析
-                if isinstance(final_answer_content, str) and final_answer_content.strip().startswith('{'):
-                    try:
-                        structured_data = json.loads(final_answer_content)
-                        answer_dict = structured_data
-                    except json.JSONDecodeError:
-                        # 如果final_answer不是JSON，保持原有结构
-                        answer_dict = {
-                            "step_by_step_analysis": answer_dict.get("step_by_step_analysis", ""),
-                            "reasoning_summary": answer_dict.get("reasoning_summary", ""),
-                            "relevant_pages": answer_dict.get("relevant_pages", []),
-                            "final_answer": answer_dict.get("final_answer", "N/A")
-                        }
-                else:
-                    # 否则使用兜底结构
-                    answer_dict = {
-                        "step_by_step_analysis": answer_dict.get("step_by_step_analysis", ""),
-                        "reasoning_summary": answer_dict.get("reasoning_summary", ""),
-                        "relevant_pages": answer_dict.get("relevant_pages", []),
-                        "final_answer": answer_dict.get("final_answer", "N/A")
-                    }
-            else:
-                # 如果不是预期格式，进行兜底
+        # 各 provider 的 send_message 现在都会返回经 Pydantic 校验的结构，或显式的
+        # 降级记录。此处只做最终一致性检查。
+        #
+        # 历史包袱：原先这里有一大段启发式兜底，会把 final_answer 里"看起来像
+        # JSON 的字符串"再解析一遍塞回答案。那段代码正是 answers_qwen_turbo.json
+        # 里 4 条 value 变成整坨 JSON 的直接成因，而且退出码为 0、无任何告警。
+        # 解析职责已上移到 src/structured_output.py，这里不再重复处理。
+        if not isinstance(answer_dict, dict):
+            print(f"Warning: provider '{self.provider}' returned "
+                  f"{type(answer_dict).__name__}, not a dict; degrading.")
+            answer_dict = {
+                "step_by_step_analysis": "",
+                "reasoning_summary": "",
+                "relevant_quotes": [],
+                "relevant_pages": [],
+                "final_answer": "N/A",
+                "_degraded": True,
+                "_parse_errors": [f"unexpected type {type(answer_dict).__name__}"],
+            }
+        elif answer_dict.get("_degraded"):
+            # 保留 send_message 标注的降级状态，不要掩盖
+            print("Warning: structured output was degraded upstream; "
+                  "this answer must not be treated as a valid model output.")
+        else:
+            missing = [f for f in REQUIRED_ANSWER_FIELDS if f not in answer_dict]
+            if missing:
+                print(f"Warning: answer is missing expected fields {missing}; degrading.")
                 answer_dict = {
-                    "step_by_step_analysis": "",
-                    "reasoning_summary": "",
-                    "relevant_pages": [],
-                    "final_answer": "N/A"
+                    "step_by_step_analysis": answer_dict.get("step_by_step_analysis", ""),
+                    "reasoning_summary": answer_dict.get("reasoning_summary", ""),
+                    "relevant_quotes": answer_dict.get("relevant_quotes", []),
+                    "relevant_pages": answer_dict.get("relevant_pages", []),
+                    "final_answer": answer_dict.get("final_answer", "N/A"),
+                    "_degraded": True,
+                    "_parse_errors": [f"missing fields {missing}"],
                 }
         return answer_dict
 
 
     def _build_rag_context_prompts(self, schema):
         """Return prompts tuple for the given schema."""
-        use_schema_prompt = True if self.provider == "ibm" or self.provider == "gemini" else False
+        # 之前只有 ibm / gemini 会把 Pydantic schema 注入 system prompt，
+        # dashscope 与 openai 被排除在外 —— 而 dashscope 是默认 provider，
+        # 于是模型连字段名都只能从示例里猜。现在全 provider 都注入。
+        use_schema_prompt = True
         
         if schema == "name":
             system_prompt = (prompts.AnswerWithRAGContextNamePrompt.system_prompt_with_schema 
@@ -671,15 +686,55 @@ class AsyncOpenaiProcessor:
         return validated_data_list
 
 # DashScope基础处理器，支持Qwen大模型对话
+def _extract_content(response) -> Optional[str]:
+    """从 DashScope 响应里取文本内容，取不到返回 None。
+
+    ``dashscope`` 返回的是 ``DictWrapper``，既支持 ``resp['output']`` 也支持
+    ``resp.output``，但 ``hasattr`` 对 dict 形式的键探测并不可靠。这里两种
+    取法都试，取不到就明确返回 None，由调用方抛错 —— 绝不把整个响应
+    ``str()`` 之后当成模型正文，那会让错误信息被当成答案继续流下去。
+    """
+    output = None
+    if isinstance(response, dict):
+        output = response.get("output")
+    else:
+        output = getattr(response, "output", None)
+
+    if not output:
+        return None
+
+    choices = output.get("choices") if isinstance(output, dict) else getattr(output, "choices", None)
+    if not choices:
+        return None
+
+    message = choices[0].get("message") if isinstance(choices[0], dict) else getattr(choices[0], "message", None)
+    if not message:
+        return None
+
+    if isinstance(message, dict):
+        return message.get("content")
+    return getattr(message, "content", None)
+
+
 class BaseDashscopeProcessor:
     def __init__(self):
         # 从环境变量读取API-KEY
+        load_project_env()
         dashscope.api_key = os.getenv("DASHSCOPE_API_KEY")
-        self.default_model = 'qwen-turbo'
+        self.default_model = generation_model()
+
+    @staticmethod
+    @retry(wait=wait_exponential(multiplier=3, min=3, max=40),
+           stop=stop_after_attempt(4),
+           retry=retry_if_exception_type(DashScopeThrottled),
+           reraise=True)
+    def _call_generation(**kwargs):
+        """统一生成调用入口，只对限流退避重试。"""
+        return dashscope.Generation.call(**kwargs)
 
     def send_message(
         self,
-        model="qwen-turbo",
+        model=None,
         temperature=0.1,
         seed=None,  # 兼容参数，暂不使用
         system_content='You are a helpful assistant.',
@@ -689,64 +744,92 @@ class BaseDashscopeProcessor:
         **kwargs
     ):
         """
-        发送消息到DashScope Qwen大模型，支持 system_content + human_content 拼接为 messages。
-        暂不支持结构化输出。
+        发送消息到 DashScope Qwen 大模型。
+
+        结构化输出：qwen 系列不支持 OpenAI 式的 response_format 强约束，但支持
+        ``response_format={'type': 'json_object'}`` JSON 模式。开启后仍可能返回
+        带围栏 / 带说明文字 / 字段嵌套错乱的文本，因此还要过
+        :func:`src.structured_output.parse_structured_output` 做提取 + 校验 +
+        修补，并把实际使用的解析策略记录在 ``self.last_parse_strategy``。
         """
         if model is None:
             model = self.default_model
-        # 拼接 messages
+
         messages = []
         if system_content:
             messages.append({"role": "system", "content": system_content})
         if human_content:
             messages.append({"role": "user", "content": human_content})
-        #print('system_content=', system_content)
-        #print('='*30)
-        #print('human_content=', human_content)
-        #print('='*30)
-        #print('messages=', messages)
-        #print('='*30)
-        # 调用 dashscope Generation.call
-        response = dashscope.Generation.call(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            result_format='message'
-        )
-        print('dashscope.api_key=', dashscope.api_key)
-        print('model=', model)
-        print('response=', response)
-        # 兼容 openai/gemini 返回格式，始终返回 dict
-        if hasattr(response, 'output') and hasattr(response.output, 'choices'):
-            content = response.output.choices[0].message.content
+
+        call_kwargs = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "result_format": "message",
+        }
+
+        if is_structured and response_format is not None:
+            # 让 schema 约束进入提示词：qwen 没有强约束，只能靠指令
+            directive = build_schema_instruction(response_format)
+            call_kwargs["messages"] = [
+                {"role": "system", "content": f"{system_content}\n\n---\n\n{directive}"}
+                if system_content else {"role": "system", "content": directive},
+            ] + ([{"role": "user", "content": human_content}] if human_content else [])
+            try:
+                response = self._call_generation(
+                    response_format={"type": "json_object"}, **call_kwargs
+                )
+            except DashScopeError as exc:
+                # 仅"模型/网关不支持 JSON 模式"才回退。限流/额度/参数错误必须
+                # 继续抛出 —— 回退只会再失败一次，然后把限流伪装成解析失败。
+                if "response_format" not in str(exc) and "json_object" not in str(exc):
+                    raise
+                print(f"Warning: DashScope rejected response_format=json_object ({exc}); "
+                      f"falling back to plain generation.")
+                response = self._call_generation(**call_kwargs)
         else:
-            content = str(response)
-        # 增加 response_data 属性，保证接口一致性
-        self.response_data = {"model": model, "input_tokens": response.usage.input_tokens if hasattr(response, 'usage') and hasattr(response.usage, 'input_tokens') else None, "output_tokens": response.usage.output_tokens if hasattr(response, 'usage') and hasattr(response.usage, 'output_tokens') else None}
-        print('content=', content)
-        
-        # 尝试解析 content 为 JSON，如果是结构化响应
-        try:
-            # 先尝试移除可能的markdown代码块标记
-            content_str = content.strip()
-            if content_str.startswith('```') and '```' in content_str[3:]:
-                # 找到第一个 ``` 和 最后一个 ``` 之间的内容
-                first_backtick = content_str.find('```') + 3
-                next_newline = content_str.find('\n', first_backtick)
-                if next_newline > 0:
-                    first_backtick = next_newline + 1
-                last_backtick = content_str.rfind('```')
-                if last_backtick > first_backtick:
-                    json_str = content_str[first_backtick:last_backtick].strip()
-                else:
-                    json_str = content_str
-            else:
-                json_str = content_str
-            
-            # 尝试解析 JSON
-            parsed_content = json.loads(json_str)
-            return parsed_content
-        except (json.JSONDecodeError, TypeError):
-            # 如果不是有效的JSON，返回基本格式
-            print(f"Content is not valid JSON, returning basic format: {content}")
-            return {"final_answer": content, "step_by_step_analysis": "", "reasoning_summary": "", "relevant_pages": []}
+            response = self._call_generation(**call_kwargs)
+
+        # 失败时 response 是 dict 而 output 为 None（限流 / 额度 / 参数）。
+        # 原实现用 `hasattr(response, 'output')` 探测，对 dict 恒为 False，
+        # 于是 content 变成字符串 "{'status_code': 429, ...}"，随后解析失败、
+        # 返回 final_answer="N/A" 的降级记录 —— **限流被伪装成"答案不可得"**，
+        # 退出码 0、日志无告警，比直接报错危险得多。
+        raise_if_api_error(response, f"{model} 结构化生成" if is_structured else f"{model} 生成")
+
+        content = _extract_content(response)
+        if content is None:
+            raise DashScopeError(
+                f"DashScope 返回的响应里没有可用的文本内容（model={model}）。\n"
+                f"  原始响应 = {str(response)[:300]}"
+            )
+
+        usage = getattr(response, 'usage', None)
+        self.response_data = {
+            "model": model,
+            "input_tokens": getattr(usage, 'input_tokens', None),
+            "output_tokens": getattr(usage, 'output_tokens', None),
+        }
+
+        if not is_structured or response_format is None:
+            self.last_parse_strategy = "unstructured"
+            return content
+
+        outcome = parse_structured_output(content, response_format)
+        self.last_parse_strategy = outcome.strategy
+        if outcome.ok:
+            return outcome.data
+
+        # 降级必须**显式可辨**，不能把原文塞进 final_answer 伪装成正常答案 ——
+        # 那样退出码是 0、日志没有告警，错误会一路流进提交物。
+        print(f"Warning: structured output FAILED ({outcome.summary()}); "
+              f"returning a degraded record.")
+        return {
+            "step_by_step_analysis": "",
+            "reasoning_summary": "",
+            "relevant_quotes": [],
+            "relevant_pages": [],
+            "final_answer": "N/A",
+            "_degraded": True,
+            "_parse_errors": outcome.errors,
+        }

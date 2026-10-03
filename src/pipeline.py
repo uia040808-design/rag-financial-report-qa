@@ -17,6 +17,7 @@ from src.ingestion import VectorDBIngestor
 from src.ingestion import BM25Ingestor
 from src.questions_processing import QuestionsProcessor
 from src.tables_serialization import TableSerializer
+from typing import Optional
 
 @dataclass
 class PipelineConfig:
@@ -57,12 +58,14 @@ class RunConfig:
     llm_reranking: bool = False
     llm_reranking_sample_size: int = 30
     top_n_retrieval: int = 10
-    parallel_requests: int = 1 # 并行的数量，需要限制，否则qwen-turbo会超出阈值
+    parallel_requests: int = 1 # 并行的数量，需要限制，否则会超出 DashScope 频率阈值
     pipeline_details: str = ""
     submission_file: bool = True
     full_context: bool = False
     api_provider: str = "dashscope" #openai
-    answering_model: str = "qwen-turbo" # gpt-4o-mini-2024-07-18 or "gpt-4o-2024-08-06"
+    # None 表示"用项目默认的生成模型"（见 env_loader.generation_model），
+    # 这样换模型只需改 GENERATION_MODEL 环境变量，不必改这里的默认值。
+    answering_model: Optional[str] = None  # gpt-4o-mini-2024-07-18 or "gpt-4o-2024-08-06"
     config_suffix: str = ""
 
 class Pipeline:
@@ -132,34 +135,41 @@ class Pipeline:
         )
         print(f"PDF reports parsed and saved to {self.paths.parsed_reports_path}")
 
-    def export_reports_to_markdown(self, file_name):
+    def export_reports_to_markdown(self, only=None, force=False):
         """
-        使用 pdf_mineru.py，将指定 PDF 文件转换为 markdown，并放到 reports_markdown_dirname 目录下。
-        :param file_name: PDF 文件名（如 '【财报】中芯国际：中芯国际2024年年度报告.pdf'）
-        """
-        # 调用 pdf_mineru 获取 task_id 并下载、解压
-        print(f"开始处理: {file_name}")
-        task_id = pdf_mineru.get_task_id(file_name)
-        print(f"task_id: {task_id}")
-        pdf_mineru.get_result(task_id)
+        用 MinerU 把 pdf_reports 下的 PDF 批量转换为 Markdown，输出到
+        debug_data/03_reports_markdown。
 
-        # 解压后目录名与 task_id 相同
-        extract_dir = f"{task_id}"
-        md_path = os.path.join(extract_dir, "full.md")
-        if not os.path.exists(md_path):
-            print(f"未找到 markdown 文件: {md_path}")
-            return
-        # 目标目录
-        os.makedirs(self.paths.reports_markdown_path, exist_ok=True)
-        # 目标文件名为原始 file_name，扩展名改为 .md
-        base_name = os.path.splitext(file_name)[0]
-        target_path = os.path.join(self.paths.reports_markdown_path, f"{base_name}.md")
-        shutil.move(md_path, target_path)
-        print(f"已将 {md_path} 移动到 {target_path}")
+        :param only: 只处理文件名含这些子串的 PDF；None 表示全部
+        :param force: True 时忽略已存在的 md，全部重新转换
+        :return: {PDF 文件名: 产出的 md 路径 or None}
+        """
+        pdf_paths = sorted(self.paths.pdf_reports_dir.glob("*.pdf"))
+        if only:
+            pdf_paths = [p for p in pdf_paths if any(k in p.name for k in only)]
+        if not pdf_paths:
+            print(f"未在 {self.paths.pdf_reports_dir} 找到 PDF")
+            return {}
+        if not force:
+            todo = [
+                p for p in pdf_paths
+                if not (self.paths.reports_markdown_path / f"{p.stem}.md").exists()
+            ]
+            if not todo:
+                print(f"{len(pdf_paths)} 份 PDF 的 Markdown 均已存在，"
+                      f"跳过转换（force=True 可强制重跑）")
+                return {}
+
+        print(f"共 {len(pdf_paths)} 个 PDF 待处理")
+        return pdf_mineru.convert_pdfs(pdf_paths, self.paths.reports_markdown_path)
 
     def chunk_reports(self, include_serialized_tables: bool = False):
         """
-        将规整后 markdown 报告分块，便于后续向量化和检索
+        将规整后 markdown 报告分块，便于后续向量化和检索。
+
+        分块时会借助 src/pdf_page_map.py 把 markdown 的每一行对齐回源 PDF 的
+        真实页码，从而为每个 chunk 打上 page 标签，并额外产出 content.pages
+        （父文档）。没有页码，父文档检索与引用出处都会失效。
         """
         text_splitter = TextSplitter()
         # 只处理 markdown 文件，输入目录为 reports_markdown_path，输出目录为 documents_dir
@@ -168,7 +178,8 @@ class Pipeline:
         text_splitter.split_markdown_reports(
             all_md_dir=self.paths.reports_markdown_path,
             output_dir=self.paths.documents_dir,
-            subset_csv=self.paths.subset_path
+            subset_csv=self.paths.subset_path,
+            pdf_reports_dir=self.paths.pdf_reports_dir
         )
         print(f"分割完成，结果已保存到 {self.paths.documents_dir}")
 
@@ -293,10 +304,13 @@ class Pipeline:
 preprocess_configs = {"ser_tab": RunConfig(use_serialized_tables=True),
                       "no_ser_tab": RunConfig(use_serialized_tables=False)}
 
+# answering_model 留空 -> 由 env_loader.generation_model() 决定（可用
+# GENERATION_MODEL 环境变量覆盖）。原先三处都硬编码 "qwen-turbo"，换模型要改
+# 三处；且该模型额度耗尽时 403 只在运行时暴露。
 base_config = RunConfig(
     parallel_requests=10,
     submission_file=True,
-    pipeline_details="Custom pdf parsing + vDB + Router + SO CoT; llm = qwen-turbo",
+    pipeline_details="Custom pdf parsing + vDB + Router + multi-doc retrieval + SO CoT",
     config_suffix="_base"
 )
 
@@ -304,8 +318,7 @@ parent_document_retrieval_config = RunConfig(
     parent_document_retrieval=True,
     parallel_requests=20,
     submission_file=True,
-    pipeline_details="Custom pdf parsing + vDB + Router + Parent Document Retrieval + SO CoT; llm = qwen-turbo",
-    answering_model="qwen-turbo",
+    pipeline_details="Custom pdf parsing + vDB + Router + Parent Document Retrieval + multi-doc retrieval + SO CoT",
     config_suffix="_pdr"
 )
 
@@ -316,9 +329,8 @@ max_config = RunConfig(
     llm_reranking=True,
     parallel_requests=4,
     submission_file=True,
-    pipeline_details="Custom pdf parsing + vDB + Router + Parent Document Retrieval + reranking + SO CoT; llm = qwen-turbo",
-    answering_model="qwen-turbo",
-    config_suffix="_qwen_turbo"
+    pipeline_details="Custom pdf parsing + vDB + Router + Parent Document Retrieval + multi-doc retrieval + reranking + SO CoT",
+    config_suffix="_max"
 )
 
 
@@ -340,10 +352,10 @@ if __name__ == "__main__":
     pipeline = Pipeline(root_path, run_config=max_config)
     
     print('4. 将pdf转化为纯markdown文本')
-    #pipeline.export_reports_to_markdown('【财报】中芯国际：中芯国际2024年年度报告.pdf') 
+    #pipeline.export_reports_to_markdown(only=['中原证券'])   # 先小批量验证
 
     # 5. 将规整后报告分块，便于后续向量化，输出到 databases/chunked_reports
-    print('5. 将规整后报告分块，便于后续向量化，输出到 databases/chunked_reports')
+    print('5. 将规整后报告分块（页边界内切分 + 页码对齐），便于后续向量化')
     pipeline.chunk_reports() 
     
     # 6. 从分块报告创建向量数据库，输出到 databases/vector_dbs
