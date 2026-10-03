@@ -97,12 +97,14 @@ class AnswerWithRAGContextNamePrompt:
     class AnswerSchema(BaseModel):
         step_by_step_analysis: str = Field(description="详细分步推理过程，至少5步，150字以上。特别注意问题措辞，避免被迷惑。有时上下文中看似有答案，但可能并非所问内容，仅为相似项。")
         reasoning_summary: str = Field(description="简要总结分步推理过程，约50字。")
-        relevant_pages: List[int] = Field(description="""
-仅包含直接用于回答问题的信息页面编号。只包括：
-- 直接包含答案或明确陈述的页面
-- 强有力支持答案的关键信息页面
-不要包含仅与答案弱相关或间接相关的页面。
-列表中至少应有一个页面。
+        relevant_quotes: List[str] = Field(description="""
+逐条给出直接用于回答问题的原文片段，必须从上下文中逐字原样复制。规则：
+- 每条 20~60 字，必须是上下文里连续、逐字出现的文字
+- 不要改写、翻译、合并，也不要用省略号跳过中间内容
+- 不要输出页码，页码由系统自动从引文中解析
+只给直接包含答案的片段，不要给仅沾边或间接相关的内容。
+若上下文完全无相关信息，返回空列表。
+若答案因指标口径不匹配而返回 N/A，仍要给出你据以判断不匹配的片段。
 """)
 
         final_answer: Union[str, Literal["N/A"]] = Field(description="""
@@ -125,7 +127,7 @@ class AnswerWithRAGContextNamePrompt:
 {
   "step_by_step_analysis": "1. 问题询问'南方航空股份有限公司'的CEO。CEO通常是公司最高管理者，有时也称总裁或董事总经理。\n2. 信息来源为该公司的年报，将用来确认CEO身份。\n3. 年报中明确指出张三为公司总裁兼首席执行官。\n4. 因此，CEO为张三。",
   "reasoning_summary": "年报明确写明张三为总裁兼CEO，直接回答了问题。",
-  "relevant_pages": [58],
+  "relevant_quotes": ["张三为公司总裁兼首席执行官"],
   "final_answer": "张三"
 }
 ```
@@ -158,12 +160,14 @@ class AnswerWithRAGContextNumberPrompt:
 
         reasoning_summary: str = Field(description="简要总结分步推理过程，约50字。")
 
-        relevant_pages: List[int] = Field(description="""
-仅包含直接用于回答问题的信息页面编号。只包括：
-- 直接包含答案或明确陈述的页面
-- 强有力支持答案的关键信息页面
-不要包含仅与答案弱相关或间接相关的页面。
-列表中至少应有一个页面。
+        relevant_quotes: List[str] = Field(description="""
+逐条给出直接用于回答问题的原文片段，必须从上下文中逐字原样复制。规则：
+- 每条 20~60 字，必须是上下文里连续、逐字出现的文字
+- 不要改写、翻译、合并，也不要用省略号跳过中间内容
+- 不要输出页码，页码由系统自动从引文中解析
+只给直接包含答案的片段，不要给仅沾边或间接相关的内容。
+若上下文完全无相关信息，返回空列表。
+若答案因指标口径不匹配而返回 N/A，仍要给出你据以判断不匹配的片段。
 """)
 
         final_answer: Union[float, int, Literal['N/A']] = Field(description="""
@@ -204,9 +208,9 @@ class AnswerWithRAGContextNumberPrompt:
 答案：
 ```
 {
-  "step_by_step_analysis": "1. 问题询问'万科企业股份有限公司'2022年总资产。'总资产'指公司拥有的全部资源。\n2. 年报第78页有'合并资产负债表'，列明2022年12月31日总资产。\n3. 该行数据为'总资产'，与问题完全匹配。\n4. 报告显示总资产为18500342000元。\n5. 无需计算，直接取值。",
-  "reasoning_summary": "年报78页直接给出2022年总资产，无需推算。",
-  "relevant_pages": [78],
+  "step_by_step_analysis": "1. 问题询问'万科企业股份有限公司'2022年总资产。'总资产'指公司拥有的全部资源。\n2. 年报的合并资产负债表中列明2022年12月31日总资产。\n3. 该行数据为'总资产'，与问题完全匹配。\n4. 报告显示总资产为18500342000元。\n5. 无需计算，直接取值。",
+  "reasoning_summary": "年报合并资产负债表直接给出2022年总资产，无需推算。",
+  "relevant_quotes": ["合并资产负债表 总资产 18,500,342,000"],
   "final_answer": 18500342000
 }
 ```
@@ -218,9 +222,9 @@ class AnswerWithRAGContextNumberPrompt:
 答案：
 ```
 {
-  "step_by_step_analysis": "1. 问题询问研发设备原值。\n2. 年报35页有'固定资产净值'12500元，但为净值，非原值。\n3. 37页有'累计折旧'11万元，但未区分研发设备。\n4. 无法直接获得研发设备原值。\n5. 因此答案为'N/A'。",
+  "step_by_step_analysis": "1. 问题询问研发设备原值。\n2. 年报的'固定资产净值'为12500元，但为净值，非原值。\n3. 另有'累计折旧'11万元，但未区分研发设备。\n4. 无法直接获得研发设备原值。\n5. 因此答案为'N/A'。",
   "reasoning_summary": "年报无研发设备原值，严格匹配应返回N/A。",
-  "relevant_pages": [35, 37],
+  "relevant_quotes": ["固定资产净值 12,500", "累计折旧 11万元"],
   "final_answer": "N/A"
 }
 ```
@@ -241,12 +245,14 @@ class AnswerWithRAGContextBooleanPrompt:
 详细分步推理过程，至少5步，150字以上。特别注意问题措辞，避免被迷惑。有时上下文中看似有答案，但可能并非所问内容，仅为相似项。
 """)
         reasoning_summary: str = Field(description="简要总结分步推理过程，约50字。")
-        relevant_pages: List[int] = Field(description="""
-仅包含直接用于回答问题的信息页面编号。只包括：
-- 直接包含答案或明确陈述的页面
-- 强有力支持答案的关键信息页面
-不要包含仅与答案弱相关或间接相关的页面。
-列表中至少应有一个页面。
+        relevant_quotes: List[str] = Field(description="""
+逐条给出直接用于回答问题的原文片段，必须从上下文中逐字原样复制。规则：
+- 每条 20~60 字，必须是上下文里连续、逐字出现的文字
+- 不要改写、翻译、合并，也不要用省略号跳过中间内容
+- 不要输出页码，页码由系统自动从引文中解析
+只给直接包含答案的片段，不要给仅沾边或间接相关的内容。
+若上下文完全无相关信息，返回空列表。
+若答案因指标口径不匹配而返回 N/A，仍要给出你据以判断不匹配的片段。
 """)        
         final_answer: Union[bool] = Field(description="""
 一个从上下文中精确提取的布尔值（True或False），直接回答问题。
@@ -260,9 +266,9 @@ class AnswerWithRAGContextBooleanPrompt:
 答案：
 ```
 {
-  "step_by_step_analysis": "1. 问题询问是否有分红政策变更。\n2. 年报12、18页提到年度分红金额增加，但政策未变。\n3. 45页有分红细节。\n4. 持续小幅增长，符合既定政策。\n5. 问题问的是政策变更，非金额变化。",
+  "step_by_step_analysis": "1. 问题询问是否有分红政策变更。\n2. 年报提到年度分红金额增加，但政策未变。\n3. 另有分红细节说明持续小幅增长。\n4. 持续小幅增长，符合既定政策。\n5. 问题问的是政策变更，非金额变化。",
   "reasoning_summary": "年报显示分红金额变化但政策未变，答案为False。",
-  "relevant_pages": [12, 18, 45],
+  "relevant_quotes": ["年度分红金额增加，但政策未变", "分红金额持续小幅增长"],
   "final_answer": false
 }
 ```
@@ -284,12 +290,15 @@ class AnswerWithRAGContextNamesPrompt:
 
         reasoning_summary: str = Field(description="简要总结推理过程，约50字。")
 
-        relevant_pages: List[int] = Field(description="""
-仅包含直接用于回答问题的页面编号。只包括：
-- 直接包含答案或明确陈述的页面
-- 强有力支持答案的关键信息页面
-不要包含仅与答案弱相关或间接相关的页面。
-列表中至少应有一个页面。
+        relevant_quotes: List[str] = Field(description="""
+逐条给出直接用于回答问题的原文片段，必须从上下文中逐字原样复制。注意区分实体类型。
+规则：
+- 每条 20~60 字，必须是上下文里连续、逐字出现的文字
+- 不要改写、翻译、合并，也不要用省略号跳过中间内容
+- 不要输出页码，页码由系统自动从引文中解析
+只给直接包含答案的片段，不要给仅沾边或间接相关的内容。
+若上下文完全无相关信息，返回空列表。
+若答案因口径不匹配而返回 N/A，仍要给出你据以判断不匹配的片段。
 """)
 
         final_answer: Union[List[str], Literal["N/A"]] = Field(description="""
@@ -317,10 +326,10 @@ class AnswerWithRAGContextNamesPrompt:
 答案：
 ```
 {
-    "step_by_step_analysis": "1. 问题询问公司新任高管名单。\n2. 年报89页列出新高管签约信息。\n3. 10.9节说明张三为新任总法律顾问，10.10节李四为新任COO。\n4. 综上，张三和李四为新任高管。",
-    "reasoning_summary": "年报10.9、10.10节明确列出张三、李四为新任高管。",
-    "relevant_pages": [89],
-    "final_answer": ["张三", "李四"]
+    "step_by_step_analysis": "1. 问题询问公司新任高管名单。\n2. 年报的高管章节列出新高管签约信息。\n3. 10.9节说明张三为新任总法律顾问，10.10节李四为新任COO。\n4. 综上，张三和李四为新任高管。",
+  "reasoning_summary": "年报10.9、10.10节明确列出张三、李四为新任高管。",
+  "relevant_quotes": ["张三为新任总法律顾问", "李四为新任COO"],
+  "final_answer": ["张三", "李四"]
 }
 ```
 """
@@ -361,7 +370,7 @@ class ComparativeAnswerPrompt:
 
         reasoning_summary: str = Field(description="简要总结推理过程，约50字。")
 
-        relevant_pages: List[int] = Field(description="保持为空列表。")
+        relevant_quotes: List[str] = Field(description="比较类问题不直接给引文，保持为空列表。")
 
         final_answer: Union[str, Literal["N/A"]] = Field(description="公司名称需与问题中完全一致。答案只能是单个公司名或'N/A'。")
 
@@ -377,7 +386,7 @@ class ComparativeAnswerPrompt:
 {
   "step_by_step_analysis": "1. 问题要求比较多家公司2022年总资产。\n2. 各公司独立答案：A公司6,601,086,000元，B公司1,249,642,000元，C公司217,435,000元。\n3. 直接比较得C公司最低。\n4. 若有公司币种不符则排除。\n5. 因此答案为C公司。",
   "reasoning_summary": "独立答案显示C公司总资产最低，直接得出结论。",
-  "relevant_pages": [],
+  "relevant_quotes": [],
   "final_answer": "C公司"
 }
 ```
@@ -475,12 +484,14 @@ class AnswerWithRAGContextStringPrompt:
 详细分步推理过程，至少5步，150字以上。请结合上下文信息，逐步分析并归纳答案。
 """)
         reasoning_summary: str = Field(description="简要总结分步推理过程，约50字。")
-        relevant_pages: List[int] = Field(description="""
-仅包含直接用于回答问题的信息页面编号。只包括：
-- 直接包含答案或明确陈述的页面
-- 强有力支持答案的关键信息页面
-不要包含仅与答案弱相关或间接相关的页面。
-列表中至少应有一个页面。
+        relevant_quotes: List[str] = Field(description="""
+逐条给出直接用于回答问题的原文片段，必须从上下文中逐字原样复制。规则：
+- 每条 20~60 字，必须是上下文里连续、逐字出现的文字
+- 不要改写、翻译、合并，也不要用省略号跳过中间内容
+- 不要输出页码，页码由系统自动从引文中解析
+只给直接包含答案的片段，不要给仅沾边或间接相关的内容。
+若上下文完全无相关信息，返回空列表。
+若答案因指标口径不匹配而返回 N/A，仍要给出你据以判断不匹配的片段。
 """)
         final_answer: str = Field(description="""
 最终答案为一段完整、连贯的文本，需基于上下文内容作答。
@@ -497,9 +508,9 @@ class AnswerWithRAGContextStringPrompt:
 答案：
 ```
 {
-  "step_by_step_analysis": "1. 问题要求总结2022年万科企业股份有限公司的主营业务。\n2. 年报第10-12页详细描述了公司主营业务，包括房地产开发、物业服务等。\n3. 结合上下文，归纳出主要业务板块。\n4. 重点突出房地产开发和相关服务。\n5. 形成简明扼要的总结。",
-  "reasoning_summary": "年报10-12页明确列出主营业务，答案基于原文归纳。",
-  "relevant_pages": [10, 11, 12],
+  "step_by_step_analysis": "1. 问题要求总结2022年万科企业股份有限公司的主营业务。\n2. 年报详细描述了公司主营业务，包括房地产开发、物业服务等。\n3. 结合上下文，归纳出主要业务板块。\n4. 重点突出房地产开发和相关服务。\n5. 形成简明扼要的总结。",
+  "reasoning_summary": "年报明确列出主营业务，答案基于原文归纳。",
+  "relevant_quotes": ["主营业务包括房地产开发、物业服务、租赁住房、物流仓储等"],
   "final_answer": "万科企业股份有限公司2022年主营业务包括房地产开发、物业服务、租赁住房、物流仓储等，核心业务为住宅及商业地产开发与运营。"
 }
 ```
