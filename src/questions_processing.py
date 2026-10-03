@@ -3,12 +3,34 @@ from typing import Union, Dict, List, Optional
 import re
 from pathlib import Path
 from src.retrieval import VectorRetriever, HybridRetriever
+from src.citation_resolver import resolve_quotes_to_pages, Citation
 from src.api_requests import APIProcessor
+from src.env_loader import generation_model
 from tqdm import tqdm
 import pandas as pd
 import threading
 import concurrent.futures
 import time
+
+
+def _coerce_page(page) -> Optional[int]:
+    """把模型给出的页码归一化为 int，无法解释时返回 None。
+
+    模型可能把页码输出成字符串（"6"），而 `'6' != 6`，不归一化会让真实引用
+    被当成幻觉静默丢弃。同时拒绝 bool 与非整数 float，避免 int() 的隐式截断。
+    """
+    if isinstance(page, bool):
+        return None
+    if isinstance(page, int):
+        return page
+    if isinstance(page, float):
+        return int(page) if page.is_integer() else None
+    if isinstance(page, str):
+        try:
+            return int(page.strip())
+        except ValueError:
+            return None
+    return None
 
 
 class QuestionsProcessor:
@@ -25,7 +47,7 @@ class QuestionsProcessor:
         top_n_retrieval: int = 10,
         parallel_requests: int = 10,
         api_provider: str = "dashscope", # openai
-        answering_model: str = "qwen-turbo", # gpt-4o-2024-08-06
+        answering_model: Optional[str] = None, # None -> env_loader.generation_model()
         full_context: bool = False
     ):
         # 初始化问题处理器，配置检索、模型、并发等参数
@@ -39,7 +61,9 @@ class QuestionsProcessor:
         self.llm_reranking = llm_reranking
         self.llm_reranking_sample_size = llm_reranking_sample_size
         self.top_n_retrieval = top_n_retrieval
-        self.answering_model = answering_model
+        # answering_model=None 时用项目默认模型（env_loader.generation_model）。
+        # 原先硬编码 "qwen-turbo"，该模型额度耗尽后只有运行时才报 403。
+        self.answering_model = answering_model or generation_model()
         self.parallel_requests = parallel_requests
         self.api_provider = api_provider
         self.openai_processor = APIProcessor(provider=api_provider)
@@ -57,7 +81,12 @@ class QuestionsProcessor:
             return json.load(file)
 
     def _format_retrieval_results(self, retrieval_results) -> str:
-        """将检索结果格式化为RAG上下文字符串"""
+        """将检索结果格式化为RAG上下文字符串。
+
+        每段都带上**来源文档名**：多文档检索下同一个页码在多份 PDF 里都存在，
+        模型若不知道某段文字出自哪份文档，就无法在多份都提到"营业收入"时
+        指出正确的那个；引用解析也失去了可用的消歧线索。
+        """
         if not retrieval_results:
             return ""
         
@@ -65,66 +94,293 @@ class QuestionsProcessor:
         for result in retrieval_results:
             page_number = result['page']
             text = result['text']
-            context_parts.append(f'Text retrieved from page {page_number}: \n"""\n{text}\n"""')
+            file_name = result.get('file_name') or result.get('pdf_sha1')
+            if file_name:
+                label = f"{file_name} — page {page_number}"
+            else:
+                label = f"page {page_number}"
+            context_parts.append(f'Text retrieved from {label}: \n"""\n{text}\n"""')
             
         return "\n\n---\n\n".join(context_parts)
 
-    def _extract_references(self, pages_list: list, company_name: str) -> list:
-        # 根据公司名和页码列表，提取引用信息
-        if self.subset_path is None:
-            raise ValueError("subset_path is required for new challenge pipeline when processing references.")
-        # 优先尝试 utf-8，失败则尝试 gbk
-        try:
-            self.companies_df = pd.read_csv(self.subset_path, encoding='utf-8')
-        except UnicodeDecodeError:
-            print('警告：subset.csv 不是 utf-8 编码，自动尝试 gbk 编码...')
-            self.companies_df = pd.read_csv(self.subset_path, encoding='gbk')
+    def _extract_references(self, citations: list) -> list:
+        """把 Citation 列表转成提交格式的 references。
 
-        # Find the company's SHA1 from the subset CSV
-        matching_rows = self.companies_df[self.companies_df['company_name'] == company_name]
-        if matching_rows.empty:
-            company_sha1 = ""
-        else:
-            company_sha1 = matching_rows.iloc[0]['sha1']
-
+        ``pdf_sha1`` 直接取自 Citation —— 不再查 subset.csv。历史实现用
+        ``matching_rows.iloc[0]['sha1']``：subset.csv 里同一家公司有 9 行，
+        于是**所有**引用都被标成同一份 PDF 的 sha1，即使内容实际来自研报。
+        这类错误不报错、页码也在合法范围内，只是把引用指到了错误的文件上，
+        比缺引用更难被发现。
+        """
         refs = []
-        for page in pages_list:
-            refs.append({"pdf_sha1": company_sha1, "page_index": page})
+        for citation in citations:
+            sha1 = getattr(citation, "sha1", None)
+            page = getattr(citation, "page", citation)
+            if not sha1:
+                print(f"Warning: citation {citation} has no pdf_sha1 and was dropped "
+                      f"— the submission format requires (pdf_sha1, page_index) and "
+                      f"guessing a document would point the citation at the wrong file.")
+                continue
+            # page 为 None 的引用不能进提交物：换算 0-based 时 None - 1 会抛
+            # TypeError；而若放行 page_index=None，评审侧也无法定位。
+            # 正常路径下校验层已剔除这类引用，这里是最后一道闸。
+            if page is None:
+                print(f"Warning: citation {citation} has no page number and was dropped.")
+                continue
+            refs.append({"pdf_sha1": sha1, "page_index": page})
         return refs
 
-    def _validate_page_references(self, claimed_pages: list, retrieval_results: list, min_pages: int = 2, max_pages: int = 8) -> list:
+    @staticmethod
+    def _retrieval_key(result: Dict) -> Citation:
+        """检索结果 -> Citation。
+
+        对 ``page`` 缺失做显式处理：缺字段的检索结果返回 ``page=None`` 的
+        Citation，它不会与任何正常引用相等，因此会在上下文检查里被剔除。
+        原实现直接 ``result["page"]`` 抛 ``KeyError`` —— 而同函数里其它所有
+        畸形输入（None 检索结果、page 为 None、缺 sha1）都被容错处理了，
+        只有这一条会崩，是不一致。
         """
-        校验LLM答案中引用的页码是否真实存在于检索结果中。
-        若不足最小页数，则补充检索结果中的top页。
+        return Citation(result.get("pdf_sha1"), result.get("page"))
+
+    def _to_citations(
+        self,
+        claimed: list,
+        retrieval_results: list,
+    ) -> tuple:
+        """把模型声明的页码归一化为 Citation 列表。
+
+        三种输入形态：
+
+        1. ``Citation`` —— 直接采用；
+        2. ``{"pdf_sha1": ..., "page_index"/"page": ...}`` —— 从 dict 提取；
+        3. 裸页码（int / 字符串）—— **无文档身份**，需靠检索结果反查。
+
+        第 3 种是模型只给 ``relevant_pages`` 时的形态。多文档下裸页码本质上是
+        歧义的：若该页码在检索面里出现于**多份**文档，就无法判断模型指的是哪
+        一份。此时**丢弃并记日志**，不做猜测 —— 猜错会产出一条带着合法 sha1 与
+        合法页码、却指向另一份 PDF 的假引用，比缺引用更难被发现。
+        """
+        if retrieval_results is None:
+            retrieval_results = []
+        candidates: List[Citation] = [
+            self._retrieval_key(r) for r in retrieval_results
+        ]
+
+        # 缺 page 的检索结果不参与"裸页码反查"：它没有页码可贡献，
+        # 留着会让 page=None 这个键混进映射，把"未给出的页码"和
+        # "页码恰好是 None"混为一谈。
+        page_to_shas: dict = {}
+        for citation in candidates:
+            if citation.page is None:
+                continue
+            page_to_shas.setdefault(citation.page, set()).add(citation.sha1)
+
+        out: List[Citation] = []
+        non_numeric: List = []
+        ambiguous: List = []
+
+        for item in claimed or []:
+            if isinstance(item, Citation):
+                page = _coerce_page(item.page)
+                if page is None:
+                    non_numeric.append(item)
+                else:
+                    out.append(Citation(item.sha1, page))
+                continue
+
+            if isinstance(item, dict):
+                page = _coerce_page(item.get("page_index", item.get("page")))
+                if page is None:
+                    non_numeric.append(item)
+                else:
+                    out.append(Citation(item.get("pdf_sha1"), page))
+                continue
+
+            page = _coerce_page(item)
+            if page is None:
+                non_numeric.append(item)
+                continue
+            owners = page_to_shas.get(page, set())
+            if len(owners) == 1:
+                out.append(Citation(next(iter(owners)), page))
+            elif len(owners) == 0:
+                # 不在检索面里，交给上下文检查剔除（保留 None 以便走同一条日志）
+                out.append(Citation(None, page))
+            else:
+                ambiguous.append(page)
+
+        return out, non_numeric, ambiguous
+
+    def _validate_page_references(
+        self,
+        claimed_pages: list,
+        retrieval_results: list,
+        min_pages: int = 0,
+        max_pages: int = 8,
+        n_pages: Optional[Dict[str, int]] = None,
+    ) -> List[Citation]:
+        """校验模型声称的引用，返回可信的 Citation 列表。
+
+        四道过滤，彼此独立：
+
+        1. **类型归一化**：字符串页码（"6"）转 int；无法解释的丢弃。
+        2. **范围检查**：剔除超出**该文档**实际页数的页码。这道检查基于文档页数
+           而非检索结果，因此在 ``full_context`` 模式（检索面 = 全部页）下依然
+           有效。多文档下页码范围逐份判定：年报 222 页、调研纪要 22 页，
+           "页码 150 是否越界"取决于它出自哪份 PDF。
+        3. **上下文检查**：剔除未出现在检索结果里的引用。
+        4. **截断**：超量时按检索得分保留，而非按模型给出的顺序。
+
+        关于兜底（``min_pages``）
+        ----------------------
+        历史实现会在模型没给页码、或给的页码全被剔除时，塞入检索 Top 页凑够
+        2 条。实测（eval/score_citations.py）：每条标注平均被塞 2.86 页，其中
+        仅 30% 与答案相关，把引用精确率从 89.7% 拉低到 59.1%，并让日志里的
+        "hallucinated" 措辞把召回不足误报成模型幻觉。
+
+        因此兜底**默认关闭**（``min_pages=0``）。宁可少一条引用，也不要一条
+        带着合法 pdf_sha1 与合法 page_index、却与答案无关的假引用 —— 后者更难
+        被发现。需要旧行为时可显式传 ``min_pages=2``。
+
+        参数 ``n_pages`` 由原来的单个页数改为 ``{sha1: 页数}`` 映射以支持多文档；
+        传入单个 int 仍按单文档处理（所有引用共用该页数）。
         """
         if claimed_pages is None:
             claimed_pages = []
-        
-        retrieved_pages = [result['page'] for result in retrieval_results]
-        
-        validated_pages = [page for page in claimed_pages if page in retrieved_pages]
-        
-        if len(validated_pages) < len(claimed_pages):
-            removed_pages = set(claimed_pages) - set(validated_pages)
-            print(f"Warning: Removed {len(removed_pages)} hallucinated page references: {removed_pages}")
-        
-        if len(validated_pages) < min_pages and retrieval_results:
-            existing_pages = set(validated_pages)
-            
+
+        # 兼容旧的单文档调用：传 int 时视为「所有引用共用这一个文档」
+        page_counts: Dict[Optional[str], int] = {}
+        if isinstance(n_pages, int):
+            page_counts[None] = n_pages
+        elif n_pages:
+            page_counts = dict(n_pages)
+
+        normalized, non_numeric, ambiguous = self._to_citations(
+            claimed_pages, retrieval_results
+        )
+
+        retrieved_keys = [self._retrieval_key(r) for r in (retrieval_results or [])]
+        retrieved_set = set(retrieved_keys)
+        rank = {key: i for i, key in enumerate(retrieved_keys)}
+
+        # ---- 1b. 歧义页码（多文档下无法确定出自哪份 PDF）----
+        if ambiguous:
+            print(f"Warning: Dropped {len(ambiguous)} ambiguous page references: "
+                  f"{sorted(set(ambiguous))} — these page numbers occur in more than "
+                  f"one retrieved document, so the source PDF cannot be determined "
+                  f"without guessing.")
+
+        # ---- 2. 范围检查（依赖各文档页数，不依赖检索面）----
+        out_of_range: List[Citation] = []
+        no_page: List[Citation] = []
+        in_range: List[Citation] = []
+        for citation in normalized:
+            if citation.page is None:
+                # 引文没解析出页码（或检索结果缺 page）—— 无从校验，
+                # 交给上下文检查剔除，但单独记日志以便与越界区分。
+                no_page.append(citation)
+                continue
+            limit = page_counts.get(citation.sha1)
+            if limit is None:
+                in_range.append(citation)
+            elif 1 <= citation.page <= limit:
+                in_range.append(citation)
+            else:
+                out_of_range.append(citation)
+
+        # ---- 3. 上下文检查 ----
+        # 未知文档身份（sha1=None）的引用按裸页码匹配，多文档下必然落空 ——
+        # 这正是期望行为：无法确定来源就不引用。
+        out_of_context = [c for c in in_range if c not in retrieved_set]
+        validated = [c for c in in_range if c in retrieved_set]
+
+        # 去重并保持模型给出的顺序
+        seen = set()
+        deduped: List[Citation] = []
+        for citation in validated:
+            if citation not in seen:
+                seen.add(citation)
+                deduped.append(citation)
+        validated = deduped
+
+        # ---- 日志：三类分开，不再一律叫 "hallucinated" ----
+        if non_numeric:
+            print(f"Warning: Dropped {len(non_numeric)} non-numeric page references: {non_numeric}")
+        if no_page:
+            print(f"Warning: Dropped {len(no_page)} citation(s) with no resolvable page "
+                  f"number — the quote was not located in the retrieved context, or the "
+                  f"retrieval result lacked a `page` field.")
+        if out_of_range:
+            detail = ", ".join(
+                f"{c.sha1[:8] if c.sha1 else '<unknown>'}:p{c.page}"
+                f"(上限{page_counts.get(c.sha1)})" for c in out_of_range
+            )
+            print(f"Warning: Dropped {len(out_of_range)} out-of-range page references: {detail}")
+        if out_of_context:
+            print(f"Warning: Dropped {len(out_of_context)} page references absent from the "
+                  f"retrieved context — these may be recall misses rather than hallucinations: "
+                  f"{sorted({(c.sha1 or '<unknown>')[:8] + ':p' + str(c.page) for c in out_of_context})}")
+
+        # ---- 超量截断：按检索得分排序后保留，而非按模型给出的顺序 ----
+        if max_pages and len(validated) > max_pages:
+            validated.sort(key=lambda c: rank.get(c, len(rank)))
+            print(f"Trimming references from {len(validated)} to {max_pages} pages "
+                  f"(keeping the highest-ranked)")
+            validated = validated[:max_pages]
+
+        # ---- 兜底：默认关闭 ----
+        if min_pages and len(validated) < min_pages and retrieval_results:
+            existing = set(validated)
             for result in retrieval_results:
-                page = result['page']
-                if page not in existing_pages:
-                    validated_pages.append(page)
-                    existing_pages.add(page)
-                    
-                    if len(validated_pages) >= min_pages:
+                citation = self._retrieval_key(result)
+                if citation not in existing:
+                    validated.append(citation)
+                    existing.add(citation)
+                    if len(validated) >= min_pages:
                         break
-        
-        if len(validated_pages) > max_pages:
-            print(f"Trimming references from {len(validated_pages)} to {max_pages} pages")
-            validated_pages = validated_pages[:max_pages]
-        
-        return validated_pages
+
+        return validated
+
+    def _resolve_citations(
+        self,
+        answer_dict: dict,
+        retrieval_results: list,
+        n_pages: Optional[Dict[str, int]] = None,
+    ) -> List[Citation]:
+        """把模型给出的引用解析为可信的 Citation 列表。
+
+        优先走**引文解析**：模型返回 ``relevant_quotes``（原文片段），页码与
+        来源文档由字符串匹配得出。这样模型不参与任何页码运算，整类"页码差一"
+        错误从源头消失（原先实测：落入检索面的差一引用 17/17 全部漏放）。
+
+        若模型没给引文（提示词未生效、旧缓存答案、其他 provider），回退到直接
+        使用 ``relevant_pages``，并给出明确告警 —— 此时仍存在差一风险，且
+        多文档下页码归属也需靠检索结果反查。
+
+        无论走哪条路径，最终引用都要过 :meth:`_validate_page_references` 的
+        范围 / 上下文 / 类型 / 截断四道检查。
+        """
+        quotes = answer_dict.get("relevant_quotes")
+
+        if isinstance(quotes, list) and quotes:
+            citations, unresolved = resolve_quotes_to_pages(quotes, retrieval_results)
+            if unresolved:
+                print(f"Warning: {len(unresolved)} quote(s) could not be located in the "
+                      f"retrieved context and were dropped: "
+                      f"{[q[:40] for q in unresolved]}")
+            if not citations:
+                print("Warning: No quote resolved to a citation; "
+                      "references will be empty rather than guessed.")
+        else:
+            legacy = answer_dict.get("relevant_pages") or []
+            print(f"Warning: Model returned no `relevant_quotes`; falling back to raw "
+                  f"`relevant_pages` ({legacy}). Page numbers are then taken at face "
+                  f"value and off-by-one errors are no longer detectable.")
+            citations, _, _ = self._to_citations(legacy, retrieval_results)
+
+        return self._validate_page_references(
+            citations, retrieval_results, n_pages=n_pages
+        )
 
     def get_answer_for_company(self, company_name: str, question: str, schema: str) -> dict:
         # 针对单个公司，检索上下文并调用LLM生成答案
@@ -170,10 +426,21 @@ class QuestionsProcessor:
         print(f"[计时] [get_answer_for_company] LLM调用耗时: {t6-t5:.2f} 秒")
         self.response_data = self.openai_processor.response_data
         if self.new_challenge_pipeline:
-            pages = answer_dict.get("relevant_pages", [])
-            validated_pages = self._validate_page_references(pages, retrieval_results)
-            answer_dict["relevant_pages"] = validated_pages
-            answer_dict["references"] = self._extract_references(validated_pages, company_name)
+            # 每份文档的页数用于**逐文档**页码范围检查；检索器不支持时退化为不做范围检查
+            page_counts = None
+            if hasattr(retriever, "document_page_counts"):
+                try:
+                    page_counts = retriever.document_page_counts(company_name)
+                except Exception:  # noqa: BLE001 - 范围检查是增强项，不应拖垮问答
+                    page_counts = None
+            citations = self._resolve_citations(
+                answer_dict, retrieval_results, n_pages=page_counts
+            )
+            # relevant_pages 保留裸页码供调试与 answer_details 展示；
+            # 提交用的 references 走 citations，保留文档身份。
+            answer_dict["relevant_pages"] = [c.page for c in citations]
+            answer_dict["citations"] = citations
+            answer_dict["references"] = self._extract_references(citations)
         print(f"[计时] [get_answer_for_company] 总耗时: {t6-t0:.2f} 秒")
         return answer_dict
 
@@ -224,6 +491,7 @@ class QuestionsProcessor:
             self.answer_details[question_index] = {
                 "step_by_step_analysis": answer_dict['step_by_step_analysis'],
                 "reasoning_summary": answer_dict['reasoning_summary'],
+                "relevant_quotes": answer_dict.get('relevant_quotes', []),
                 "relevant_pages": answer_dict['relevant_pages'],
                 "response_data": self.response_data,
                 "self": ref_id
