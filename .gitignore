@@ -136,13 +136,26 @@ celerybeat.pid
 *.sage.py
 
 # Environments
+# 注意：`env/` 只匹配目录，**不匹配名为 env 的文件**。本仓库根目录曾有一个
+# 名为 `env` 的密钥模板文件，因这条规则而未被忽略、直接进了 git。
+# 这里同时覆盖文件与目录两种形式。
 .env
 .venv
+env
 env/
 venv/
 ENV/
 env.bak/
 venv.bak/
+
+# MinerU 本地切分 PDF 的临时目录（超 200 页的文档会被切成多份再提交）
+_mineru_work/
+
+# 工具/笔记目录
+.workbuddy/
+
+# embedding 失败时的本地日志（ingestion 会写入）
+embedding_error.log
 
 # Spyder project settings
 .spyderproject
