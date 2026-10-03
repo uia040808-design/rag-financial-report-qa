@@ -12,6 +12,9 @@ data/stock_data/answers_*.json
 data/stock_data/databases/
 data/stock_data/debug_data/
 
+# 不纳入版本管理的本地目录
+docs/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
