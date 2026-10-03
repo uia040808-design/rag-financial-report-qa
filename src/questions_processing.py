@@ -221,7 +221,7 @@ class QuestionsProcessor:
     ) -> List[Citation]:
         """校验模型声称的引用，返回可信的 Citation 列表。
 
-        四道过滤，彼此独立：
+        五道过滤，彼此独立：
 
         1. **类型归一化**：字符串页码（"6"）转 int；无法解释的丢弃。
         2. **范围检查**：剔除超出**该文档**实际页数的页码。这道检查基于文档页数
@@ -230,6 +230,8 @@ class QuestionsProcessor:
            "页码 150 是否越界"取决于它出自哪份 PDF。
         3. **上下文检查**：剔除未出现在检索结果里的引用。
         4. **截断**：超量时按检索得分保留，而非按模型给出的顺序。
+        5. **无页码剔除**：引文没解析出页码（或检索结果缺 ``page``）的引用剔除，
+           并单独记日志以便与「越界」区分。
 
         关于兜底（``min_pages``）
         ----------------------
@@ -303,7 +305,7 @@ class QuestionsProcessor:
                 deduped.append(citation)
         validated = deduped
 
-        # ---- 日志：三类分开，不再一律叫 "hallucinated" ----
+        # ---- 日志：四类分开，不再一律叫 "hallucinated" ----
         if non_numeric:
             print(f"Warning: Dropped {len(non_numeric)} non-numeric page references: {non_numeric}")
         if no_page:
@@ -358,7 +360,7 @@ class QuestionsProcessor:
         多文档下页码归属也需靠检索结果反查。
 
         无论走哪条路径，最终引用都要过 :meth:`_validate_page_references` 的
-        范围 / 上下文 / 类型 / 截断四道检查。
+        范围 / 上下文 / 类型 / 截断 / 无页码五道检查。
         """
         quotes = answer_dict.get("relevant_quotes")
 

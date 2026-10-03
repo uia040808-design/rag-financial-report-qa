@@ -18,7 +18,7 @@
 - **父文档检索**：检索到相关文本块后，向上回溯返回完整页面内容，保留上下文
 - **思维链推理**：答案包含分步分析、推理摘要、引用原文、最终答案等结构化字段
 - **结构化输出**：DashScope 走 JSON 模式 + 提示词注入 schema + 五级解析阶梯（裸 JSON / 剥围栏 / 括号平衡扫描 / json_repair / 嵌套下钻），全程 Pydantic 校验；解析失败时返回**显式标记的降级记录**而非把原文伪装成答案
-- **引用溯源**：MinerU 产出的 Markdown 不含页码，由 `src/pdf_page_map.py` 用字符 n-gram 顺序对齐把它映射回源 PDF 的真实页码。9/9 文档对齐成功；兴证国际 / 年报 / 调研纪要的 PDF 页脚交叉校验一致率 100%（1714/1714 页）
+- **引用溯源**：MinerU 产出的 Markdown 不含页码，由 `src/pdf_page_map.py` 用字符 n-gram 顺序对齐把它映射回源 PDF 的真实页码。9/9 文档对齐成功；带可识别页脚的 227 页共校验 1752 行，与页脚所印页码 100% 一致（年报 1714 行、兴证国际 38 行；调研纪要无页脚，该份无此旁证）
 - **引文式引用**：模型返回**原文片段**而非页码，系统用字符串匹配解析出页码，模型不参与页码运算，从源头消除"页码差一"错误（实测：差一引用原先拦截率 0，现该类错误无法表示）
 - **跨文档引用**：引用一律是 `(pdf_sha1, page_index)` 成对出现 —— 多文档下页码不唯一，年报和调研纪要都有「第 5 页」
 - **引用校验**：五道独立检查（页码类型归一化、逐文档页数范围、检索上下文、按检索排名截断、无页码剔除），按四类分别记录日志；页码兜底默认关闭
@@ -50,27 +50,25 @@
 ├── env                        # 环境变量模板（已取消 git 跟踪；.env 与 env 两种命名都支持）
 ├── data/
 │   └── stock_data/            # 中芯国际数据目录（PDF 报告、问题集、元数据）
-└── src/
-    ├── pipeline.py            # 主流程调度（分块、建库、问答），内置多种配置
-    ├── pdf_parsing.py         # Docling PDF 结构化解析
-    ├── pdf_mineru.py          # MinerU PDF 转 Markdown
-    ├── parsed_reports_merging.py  # 解析结果规整为页文本
-    ├── pdf_page_map.py        # Markdown 行 -> 源 PDF 真实页码的对齐
-    ├── text_splitter.py       # 文本分块（页边界内切分，产出 chunks + pages）
-    ├── ingestion.py           # 构建 FAISS 向量库（BM25Ingestor 已实现，未启用）
-    ├── retrieval.py           # 向量检索 + LLM 重排 + 父文档回溯（BM25Retriever 未接入）
-    ├── reranking.py           # 检索结果 LLM 重排序（JinaReranker 已实现，未接入）
-    ├── questions_processing.py # 问答主逻辑（检索、RAG 上下文、生成、引用校验）
-    ├── citation_resolver.py   # 引文 -> 页码解析
-    ├── structured_output.py   # 结构化输出解析、校验与降级标记
-    ├── prompts.py             # 所有提示词与结构化输出 Schema
-    ├── tables_serialization.py # 表格序列化（TableSerializer 已实现，主流程未调用）
-    ├── api_requests.py        # 大模型 API 调用封装
-    └── api_request_parallel_processor.py  # 并发限流的批量 API 请求处理
+├── src/
+│   ├── pipeline.py            # 主流程调度（分块、建库、问答），内置多种配置
+│   ├── pdf_parsing.py         # Docling PDF 结构化解析
+│   ├── pdf_mineru.py          # MinerU PDF 转 Markdown
+│   ├── parsed_reports_merging.py  # 解析结果规整为页文本
+│   ├── pdf_page_map.py        # Markdown 行 -> 源 PDF 真实页码的对齐
+│   ├── text_splitter.py       # 文本分块（页边界内切分，产出 chunks + pages）
+│   ├── ingestion.py           # 构建 FAISS 向量库（BM25Ingestor 已实现，未启用）
+│   ├── retrieval.py           # 向量检索 + LLM 重排 + 父文档回溯（BM25Retriever 未接入）
+│   ├── reranking.py           # 检索结果 LLM 重排序（JinaReranker 已实现，未接入）
+│   ├── questions_processing.py # 问答主逻辑（检索、RAG 上下文、生成、引用校验）
+│   ├── citation_resolver.py   # 引文 -> 页码解析
+│   ├── structured_output.py   # 结构化输出解析、校验与降级标记
+│   ├── prompts.py             # 所有提示词与结构化输出 Schema
+│   ├── tables_serialization.py # 表格序列化（TableSerializer 已实现，主流程未调用）
+│   ├── api_requests.py        # 大模型 API 调用封装
+│   └── api_request_parallel_processor.py  # 并发限流的批量 API 请求处理
 └── eval/                      # 引用评测（标注集、评分脚本、回归门禁）
 ```
-
-各模块的详细说明见 [docs/src_modules_overview.md](docs/src_modules_overview.md)。
 
 ## 评测
 
@@ -233,7 +231,7 @@ streamlit run app_streamlit.py
 
 | 配置名 | 说明 |
 | --- | --- |
-| `base` | 基础配置：多文档向量检索 + 父文档检索 |
+| `base` | 基础配置：多文档向量检索（父文档检索未启用，`parent_document_retrieval` 默认 False） |
 | `pdr` | 启用父文档检索 |
 | `max` | 推荐最佳配置：多文档向量检索 + 父文档检索 + LLM 重排 |
 
@@ -259,7 +257,7 @@ streamlit run app_streamlit.py
 
 ## 数据集说明
 
-当前数据目录为 `data/stock_data`，包含 9 份中芯国际相关的 PDF 文档（共 313 页）：
+当前数据目录为 `data/stock_data`，包含 9 份中芯国际相关的 PDF 文档（共 315 页）：
 
 - **财报**：中芯国际 2024 年年度报告
 - **券商研报**：上海证券、东方证券、中原证券、光大证券、兴证国际、华泰证券、国信证券对中芯国际的研究报告
@@ -269,7 +267,7 @@ streamlit run app_streamlit.py
 
 | 文件 | 说明 |
 | --- | --- |
-| `pdf_reports/` | PDF 源报告（9 份，313 页） |
+| `pdf_reports/` | PDF 源报告（9 份，315 页） |
 | `questions.json` | 测试问题集 |
 | `subset.csv` | 报告元数据（sha1、文件名、公司名、来源类型、PDF 页数），9 行真实 sha1 |
 | `databases/` | 运行后生成：分块报告（chunked_reports）与向量库（vector_dbs） |
