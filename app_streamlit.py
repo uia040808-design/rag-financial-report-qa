@@ -2,19 +2,24 @@ import streamlit as st
 from pathlib import Path
 from src.pipeline import Pipeline, max_config
 from src.questions_processing import QuestionsProcessor
+from src.env_loader import generation_model
 import json
 
 # 你可以让 root_path 固定，也可以让用户输入
 root_path = Path("data/stock_data")
 pipeline = Pipeline(root_path, run_config=max_config)
 
-st.set_page_config(page_title="RAG Challenge 2", layout="wide")
+# 模型名实时取自 env_loader，不再硬编码在文案里 ——
+# 否则换 GENERATION_MODEL 后文案会静默过期（原先写死 qwen-turbo，实际已换 qwen-plus）。
+MODEL_NAME = generation_model()
+
+st.set_page_config(page_title="中文金融报告 RAG 问答", layout="wide")
 
 # 页面标题
-st.markdown("""
+st.markdown(f"""
 <div style='background: linear-gradient(90deg, #7b2ff2 0%, #f357a8 100%); padding: 20px 0; border-radius: 12px; text-align: center;'>
-    <h2 style='color: white; margin: 0;'>🚀 RAG Challenge 2</h2>
-    <div style='color: #fff; font-size: 16px;'>基于深度RAG系统，由RTX 5080 GPU加速 | 支持多公司年报问答 | 向量检索+LLM推理+通义千问（qwen-turbo）</div>
+    <h2 style='color: white; margin: 0;'>🚀 中文金融报告 RAG 问答</h2>
+    <div style='color: #fff; font-size: 16px;'>多文档向量检索 + LLM 重排 + 父文档检索 | 引文式页码溯源 | 生成模型 {MODEL_NAME}</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -22,7 +27,16 @@ st.markdown("""
 with st.sidebar:
     st.header("查询设置")
     # 仅单问题输入
-    user_question = st.text_area("输入问题", "请简要总结中芯国际2022年主营业务的主要内容。", height=80)
+    user_question = st.text_area("输入问题", "中芯国际2024年的营收和利润情况如何？", height=80)
+    kind = st.selectbox(
+        "答案类型",
+        options=["string", "number", "boolean", "name", "names"],
+        index=0,
+        help=("对应 prompts 里的不同 Schema。\n"
+              "string=自由文本；number=数值（启用币种/单位校验与禁止推导的防幻觉规则）；\n"
+              "boolean=是否类；name=单一实体名；names=实体列表。\n"
+              "默认 string，与批量流程 questions.json 中各题的 kind 一致。"),
+    )
     st.caption("提示：知识库当前仅收录「中芯国际」，问题中必须包含公司名才能检索")
     submit_btn = st.button("生成答案", use_container_width=True)
 
@@ -32,7 +46,7 @@ st.markdown("<h3 style='margin-top: 24px;'>检索结果</h3>", unsafe_allow_html
 if submit_btn and user_question.strip():
     with st.spinner("正在生成答案，请稍候..."):
         try:
-            answer = pipeline.answer_single_question(user_question, kind="string")
+            answer = pipeline.answer_single_question(user_question, kind=kind)
             # 兼容 answer 可能为 str 或 dict
             if isinstance(answer, str):
                 try:
