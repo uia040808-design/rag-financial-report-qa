@@ -10,17 +10,19 @@
 
 ## 功能特性
 
-- **PDF 智能解析**：支持 Docling 结构化解析，也支持 MinerU 将 PDF 转换为高质量 Markdown
+- **PDF 智能解析**：MinerU 转 Markdown（默认走 Agent 免 Token 接口），也支持 Docling 结构化解析
 - **语义向量检索**：基于 FAISS 向量库 + DashScope `qwen3.7-text-embedding-flash` 向量模型，支持中文语义检索
+- **多文档检索**：同一公司的全部文档合并排序，而非按公司名路由到单个文档（见下文实测）
 - **关键词检索**：内置 BM25 传统检索，可进行混合检索
-- **LLM 重排序**：使用大模型对初步检索结果进行二次排序，显著提升检索相关性
+- **LLM 重排序**：用大模型对检索结果二次排序；模型返回的分数被真正解析与使用，解析失败时降级为纯向量排序
 - **父文档检索**：检索到相关文本块后，向上回溯返回完整页面内容，保留上下文
-- **结构化输出 + 思维链推理**：答案包含分步分析、推理摘要、相关页面、引用来源、最终答案等结构化字段
+- **思维链推理**：答案包含分步分析、推理摘要、引用原文、最终答案等结构化字段
 - **结构化输出**：DashScope 走 JSON 模式 + 提示词注入 schema + 五级解析阶梯（裸 JSON / 剥围栏 / 括号平衡扫描 / json_repair / 嵌套下钻），全程 Pydantic 校验；解析失败时返回**显式标记的降级记录**而非把原文伪装成答案
-- **引用溯源**：MinerU 产出的 Markdown 不含页码，由 `src/pdf_page_map.py` 用字符 n-gram 顺序对齐把它映射回源 PDF 的真实页码（用 PDF 自带页脚交叉校验，一致率 100%）
-- **引文式引用**：模型返回**原文片段**而非页码，系统用字符串匹配解析出页码，模型不参与页码运算，从源头消除"页码差一"错误
-- **引用校验**：四道独立检查（页码类型归一化、文档页数范围、检索上下文、按检索排名截断），并按三类分别记录日志
-- **引用评测**：`eval/` 提供带页码标注的固定集与评分脚本，量化引用精确率与召回率
+- **引用溯源**：MinerU 产出的 Markdown 不含页码，由 `src/pdf_page_map.py` 用字符 n-gram 顺序对齐把它映射回源 PDF 的真实页码。9/9 文档对齐成功；兴证国际 / 年报 / 调研纪要的 PDF 页脚交叉校验一致率 100%（1714/1714 页）
+- **引文式引用**：模型返回**原文片段**而非页码，系统用字符串匹配解析出页码，模型不参与页码运算，从源头消除"页码差一"错误（实测：差一引用原先拦截率 0，现该类错误无法表示）
+- **跨文档引用**：引用一律是 `(pdf_sha1, page_index)` 成对出现 —— 多文档下页码不唯一，年报和调研纪要都有「第 5 页」
+- **引用校验**：五道独立检查（页码类型归一化、逐文档页数范围、检索上下文、按检索排名截断、无页码剔除），按四类分别记录日志；页码兜底默认关闭
+- **引用评测**：`eval/` 提供带页码标注的固定集（46 条 / 覆盖 9 份文档）与评分脚本，带基线回归门禁
 - **Web 交互界面**：基于 Streamlit 的可视化问答界面，支持单问题即时问答
 - **命令行工具**：基于 click 的 CLI，可独立运行流程中的每个阶段
 
@@ -45,7 +47,7 @@
 ├── app_streamlit.py           # Streamlit Web 问答界面
 ├── setup.py                   # Python 包配置
 ├── requirements.txt           # 依赖列表
-├── env                        # 环境变量模板（需重命名为 .env 并填入密钥）
+├── env                        # 环境变量模板（已取消 git 跟踪；.env 与 env 两种命名都支持）
 ├── data/
 │   └── stock_data/            # 中芯国际数据目录（PDF 报告、问题集、元数据）
 └── src/
@@ -82,6 +84,21 @@ python -m eval.score_structured           # 结构化输出解析与降级
 两个脚本都支持 `--save-baseline` 建立基线，之后每次运行会与基线对比，
 检出劣化时退出码非 0，可直接接入 CI。详见 [eval/README.md](eval/README.md)。
 
+标注集：46 条 / 覆盖全部 9 份文档 / 真值页合计 63 页。页码由锚串在原文里
+检索得到，不经模型推断；锚串需通过**全局区分度筛查**（长度、纯数字锚串长度、
+全语料命中页数上限）—— 只按单文档计数不够，种子 `'22.5%'` 归一化后是 `'225'`，
+在 9 份文档里命中 31 页，逐文档检查却全部通过。详见 eval/README.md。
+
+当前基线（摘要）：
+
+| 指标 | 修复前 | 当前 |
+| --- | --- | --- |
+| 最终引用精确率 | 59.1% | **100%** |
+| 兜底页/标注 | 2.86 | **0.00** |
+| 多文档召回 | 9.7% | **73.0%** |
+| 越界剔除（full_context 下） | 无此项（会放行） | **100%** |
+| 结构化输出误放率 | — | **0.0%** |
+
 ## 环境准备
 
 ### 1. 安装依赖
@@ -96,7 +113,8 @@ pip install -r requirements.txt
 
 ### 2. 配置 API 密钥
 
-将项目根目录下的 `env` 文件重命名为 `.env`，填入你自己的密钥：
+编辑项目根目录下的 `env`（或 `.env`，两种命名都支持，`src/env_loader.py`
+按「真实环境变量 > `.env` > `env`」的优先级合并），填入你自己的密钥：
 
 ```ini
 # 必填：阿里云百炼（DashScope）密钥，用于向量化和问答模型
@@ -122,12 +140,17 @@ JINA_API_KEY=jina_xxxxx
 > 所以 `MINERU_API_KEY` 只在你显式改用标准 API 时才需要。
 > 其余密钥仅在切换到对应模型时才需要。
 >
-> ⚠️ **请勿把真实密钥提交到 Git。** 本仓库根目录的 `env` 文件是模板，
-> 但 `.gitignore` 里写的是 `env/`（带斜杠，只匹配目录），因此**这个文件本身
-> 目前是被 git 跟踪的**。请把它改名为 `.env`（`.env` 已在 ignore 列表中），
-> 并在模板仓库里只保留占位符。
+> ⚠️ **请勿把真实密钥提交到 Git。** `env` 文件已从 git 跟踪中移除
+> （`git rm --cached env`），并在 `.gitignore` 里同时覆盖了文件与目录两种形式
+> —— 原先只写 `env/`（带斜杠，只匹配目录），导致这个文件本身仍被跟踪。
+> 建议改名为 `.env`（`.env` 已在 ignore 列表中）。
+>
+> 历史上 `src/pdf_mineru.py` 曾硬编码过一个**真实** token，且代码注释声称那只是
+> 占位符。该 token 已从代码与 git 历史中移除，但**仍应视为已泄漏**，建议去
+> [mineru.net](https://mineru.net) 控制台吊销重发。`get_api_key()` 现在只读
+> 环境变量、不再有回退到模块常量的路径 —— 那个回退本身就是泄漏成因。
 
-### 2.1 PDF 转 Markdown（需要 MinerU token）
+### 2.1 PDF 转 Markdown（默认无需 token）
 
 ```bash
 # 全量转换（跳过已存在的 .md）
@@ -138,15 +161,22 @@ python -m src.pdf_mineru --only 中原证券
 
 # 强制重跑
 python -m src.pdf_mineru --pdf-dir data/stock_data/pdf_reports --out data/stock_data/debug_data/03_reports_markdown
+
+# 显式走标准 API（需 MINERU_API_KEY；标准 API 当前不可用，见下）
+python -m src.pdf_mineru --api standard
 ```
 
-MinerU 走官方 batch 上传接口：申请预签名 URL → PUT 上传 → 轮询 batch 结果。
-限额为单文件 ≤200MB、**≤200 页**、单次 ≤50 个文件；超页数的文件会在本地被
-提前拦下并给出提示，不会浪费配额。产物除 `full.md` 外还会保存
-`*.content_list.json`，其中带权威的 `page_idx`，用于页码对齐的交叉校验。
+默认走 **Agent 轻量接口**（`/api/v1/agent`）：免 Token、仅按 IP 限频。
+超 200 页的文档（如 222 页的年报）会在本地切分后逐份提交。
 
-> 注意：中芯国际 2024 年年报有 **222 页**，超过单文件 200 页上限。若尚未转换，
-> 需分页处理或改用其它解析路径。
+> **标准 API（`/api/v4`）当前不可用**：实测任务能被受理（`code=0`、返回
+> `task_id`），但 `state` 永远停在 `pending`、`err_msg` 为空，原因未知。
+> 已排除 token 无效、上传失败、端点错误、参数与配额等因素。
+> 因此默认路径是 Agent API，`convert_pdfs`（标准 API）保留但需显式指定。
+> 四个待处理的 `batch_id` 可用 `--resume` 续跑。
+
+MinerU 产物除 `full.md` 外还会保存 `*.content_list.json`，其中带权威的
+`page_idx`，用于页码对齐的交叉校验。
 
 ### 3. 下载 Docling 模型（首次运行）
 
@@ -175,7 +205,15 @@ python main.py process-reports --config no_ser_tab
 
 # 3. 处理问题，生成答案（max 为推荐最佳配置）
 python main.py process-questions --config max
+
+# 单问模式：直接回答一个问题并打印结果（用于调试与验证）
+python main.py process-questions --question "中芯国际2024年的产能利用率是多少？"
+python main.py process-questions --question "..." --kind number
 ```
+
+> `--config` 的可选值由 `configs` 字典**动态生成**，避免声明与实现不一致。
+> 注意 `process-reports` 与 `process-questions` 的选项集合不同：
+> 前者是预处理配置（`no_ser_tab` / `ser_tab`），后者是问答配置（`base` / `max` / `pdr`）。
 
 ### 方式三：Streamlit Web 界面
 
@@ -229,14 +267,26 @@ streamlit run app_streamlit.py
 
 | 文件 | 说明 |
 | --- | --- |
-| `pdf_reports/` | PDF 源报告 |
+| `pdf_reports/` | PDF 源报告（9 份，313 页） |
 | `questions.json` | 测试问题集 |
-| `subset.csv` | 报告元数据（sha1、文件名、公司名） |
+| `subset.csv` | 报告元数据（sha1、文件名、公司名、来源类型、PDF 页数），9 行真实 sha1 |
 | `databases/` | 运行后生成：分块报告（chunked_reports）与向量库（vector_dbs） |
 | `debug_data/` | 运行后生成：PDF 转换的 Markdown 中间产物 |
 | `answers_*.json` | 运行后生成：历史答案输出文件 |
 
 其中 `databases/`、`debug_data/`、`answers_*.json` 均为运行产物，可通过 pipeline 重新生成，无需手动维护。
+
+### 已知限制
+
+- **扫描页的 PDF 文本层不完整**：机构调研纪要 PDF 有 6/22 页文本层近乎空白
+  （需 OCR）。页码对齐用的是 MinerU 的 OCR 结果，内容正确；但用文本层做
+  独立核验时这些页无法验证（`eval/` 已把它们单列为「无法核验」而非记为失败）。
+- **公司名匹配在多公司扩展时需改法**：`_reports_for_company` 用
+  「`company_name` 全等 **或** 公司名是 `file_name` 的子串」。当前语料只有一家
+  公司故无影响，但若同时存在「中芯国际」与「中芯国际华虹」这类互为子串的公司名，
+  后者会被前者误命中，答案跨公司串联且不报错。改法见代码注释。
+- **多文档比单文档 oracle 差 19pt**：这是多文档检索的固有代价 —— 它要先花
+  候选名额证明「该看哪份文档」。生产用「30 个候选 → LLM 重排 → 10 页」吸收。
 
 ### 多文档检索
 
@@ -253,7 +303,14 @@ streamlit run app_streamlit.py
 | 单文档 oracle（已知答案所属 PDF） | 92.1% |
 
 多文档距 oracle 差 19 个百分点，这部分要用更大候选预算换回来（`top_n=80` 时
-93.7%）。生产配置 `llm_reranking_sample_size=30` → LLM 重排 → `top_n=6` 正落在这个区间。
+93.7%）。生产配置 `llm_reranking_sample_size=30` → LLM 重排 → `top_n=10`
+（`max_config.top_n_retrieval`）正落在这个区间。
+
+> **为什么不把候选池加大到 60？** 实测加倍候选的召回增益上界只有 3 个真值页
+> （85.7% → 90.5%），且这 3 个页在 60 名候选里的排名分别是 **43 / 55 / 60**。
+> 重排只能在候选池内挑选，把第 43 名提到前 10 名要越过前面 30 个更强候选，
+> 实际增益大概率是 0。代价则是批次数 3 → 6、重排耗时从实测约 105 秒涨到
+> 约 210 秒。
 
 > 注意对照组：oracle 假设已经知道答案在哪份 PDF 里，而原实现恰恰不具备该能力。
 > 拿多文档去比 oracle 会得出「多文档反而更差」的错误结论。
