@@ -10,7 +10,7 @@
 
 ## 功能特性
 
-- **PDF 智能解析**：MinerU 转 Markdown（默认走 Agent 免 Token 接口），也支持 Docling 结构化解析
+- **PDF 智能解析**：MinerU 转 Markdown（默认走 Agent 免 Token 接口）。Docling 解析代码保留但**不在主流程上** —— `Pipeline.parse_pdf_reports` 引用的 `parsed_reports_path` 属性在 `PipelineConfig` 里被注释掉，调用即 `AttributeError`；当前可用入口只有 MinerU
 - **语义向量检索**：基于 FAISS 向量库 + DashScope `qwen3.7-text-embedding-flash` 向量模型，支持中文语义检索
 - **多文档检索**：同一公司的全部文档合并排序，而非按公司名路由到单个文档（见下文实测）
 - **关键词检索**：BM25 组件已实现（`BM25Ingestor` / `BM25Retriever`）但**未启用** —— 默认链路不建索引（`databases/` 下无 `bm25_dbs` 产物）、`BM25Retriever` 无任何调用方，且分词是 `str.split()`（对中文无效，需 jieba）。**不构成本系统当前能力**，实际检索是「向量检索 + LLM 重排 + 父文档检索」
@@ -30,12 +30,12 @@
 
 | 环节 | 技术 |
 | --- | --- |
-| PDF 解析 | Docling、MinerU |
-| 文本分块 | 自研文本分割器（按 Token 数切分，含表格特殊处理） |
+| PDF 解析 | MinerU（主流程）。Docling 保留但未接入，见「功能特性」 |
+| 文本分块 | 自研文本分割器，**按行**切分（30 行/块、5 行重叠），在页边界内切分保证块不跨页 —— 父文档回溯的前提。按 token 的 300/50 路径已实现，未启用 |
 | 向量化 | 阿里云百炼 `qwen3.7-text-embedding-flash` |
 | 向量检索 | FAISS（余弦内积） |
 | 关键词检索 | BM25（rank-bm25）——已实现**未启用**，见「功能特性」 |
-| 重排序 | LLM 重排（默认 qwen，可选 Jina Reranker） |
+| 重排序 | LLM 重排（默认 qwen）。`JinaReranker` 类已实现但**从未实例化**，未接入 |
 | 问答模型 | 通义千问（默认 `qwen-plus`，`GENERATION_MODEL` 可改；也支持 GPT-4o 等） |
 | 交互界面 | Streamlit |
 
@@ -59,12 +59,12 @@
     ├── text_splitter.py       # 文本分块（页边界内切分，产出 chunks + pages）
     ├── ingestion.py           # 构建 FAISS 向量库（BM25Ingestor 已实现，未启用）
     ├── retrieval.py           # 向量检索 + LLM 重排 + 父文档回溯（BM25Retriever 未接入）
-    ├── reranking.py           # 检索结果重排序（LLM / Jina）
+    ├── reranking.py           # 检索结果 LLM 重排序（JinaReranker 已实现，未接入）
     ├── questions_processing.py # 问答主逻辑（检索、RAG 上下文、生成、引用校验）
     ├── citation_resolver.py   # 引文 -> 页码解析
     ├── structured_output.py   # 结构化输出解析、校验与降级标记
     ├── prompts.py             # 所有提示词与结构化输出 Schema
-    ├── tables_serialization.py # 表格序列化（可选）
+    ├── tables_serialization.py # 表格序列化（TableSerializer 已实现，主流程未调用）
     ├── api_requests.py        # 大模型 API 调用封装
     └── api_request_parallel_processor.py  # 并发限流的批量 API 请求处理
 └── eval/                      # 引用评测（标注集、评分脚本、回归门禁）
@@ -131,7 +131,7 @@ OPENAI_API_KEY=sk-xxxxx
 # 可选：Gemini 密钥
 GEMINI_API_KEY=AIzaSxxxxx
 
-# 可选：Jina 重排密钥
+# 可选：Jina 重排密钥（JinaReranker 未接入主链路，配了暂不会被使用）
 JINA_API_KEY=jina_xxxxx
 ```
 
@@ -178,7 +178,9 @@ python -m src.pdf_mineru --api standard
 MinerU 产物除 `full.md` 外还会保存 `*.content_list.json`，其中带权威的
 `page_idx`，用于页码对齐的交叉校验。
 
-### 3. 下载 Docling 模型（首次运行）
+### 3. 下载 Docling 模型（可选，非必需）
+
+主流程走 MinerU，**不需要这一步**，可跳过。仅当你准备恢复已停用的 Docling 解析链路时才需要：
 
 ```bash
 python main.py download_models
@@ -235,7 +237,7 @@ streamlit run app_streamlit.py
 | `pdr` | 启用父文档检索 |
 | `max` | 推荐最佳配置：多文档向量检索 + 父文档检索 + LLM 重排 |
 
-另有表格序列化配置：`ser_tab`（使用 LLM 序列化表格）/ `no_ser_tab`（不使用）。
+另有预处理配置 `ser_tab` / `no_ser_tab`。⚠️ **当前 `ser_tab` 是空转的**：它只把输出目录改名为 `databases_ser_tab`，`process_parsed_reports()` 并不读 `use_serialized_tables`，分块与建库逻辑完全相同 —— `TableSerializer` 已导入但从未实例化，`main.py serialize-tables` 命令则直接报错。不建议使用。
 
 ### 模型配置
 
