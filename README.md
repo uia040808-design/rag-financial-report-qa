@@ -13,7 +13,7 @@
 - **PDF 智能解析**：MinerU 转 Markdown（默认走 Agent 免 Token 接口），也支持 Docling 结构化解析
 - **语义向量检索**：基于 FAISS 向量库 + DashScope `qwen3.7-text-embedding-flash` 向量模型，支持中文语义检索
 - **多文档检索**：同一公司的全部文档合并排序，而非按公司名路由到单个文档（见下文实测）
-- **关键词检索**：内置 BM25 传统检索，可进行混合检索
+- **关键词检索**：BM25 组件已实现（`BM25Ingestor` / `BM25Retriever`）但**未启用** —— 默认链路不建索引（`databases/` 下无 `bm25_dbs` 产物）、`BM25Retriever` 无任何调用方，且分词是 `str.split()`（对中文无效，需 jieba）。**不构成本系统当前能力**，实际检索是「向量检索 + LLM 重排 + 父文档检索」
 - **LLM 重排序**：用大模型对检索结果二次排序；模型返回的分数被真正解析与使用，解析失败时降级为纯向量排序
 - **父文档检索**：检索到相关文本块后，向上回溯返回完整页面内容，保留上下文
 - **思维链推理**：答案包含分步分析、推理摘要、引用原文、最终答案等结构化字段
@@ -34,7 +34,7 @@
 | 文本分块 | 自研文本分割器（按 Token 数切分，含表格特殊处理） |
 | 向量化 | 阿里云百炼 `qwen3.7-text-embedding-flash` |
 | 向量检索 | FAISS（余弦内积） |
-| 关键词检索 | BM25（rank-bm25） |
+| 关键词检索 | BM25（rank-bm25）——已实现**未启用**，见「功能特性」 |
 | 重排序 | LLM 重排（默认 qwen，可选 Jina Reranker） |
 | 问答模型 | 通义千问（默认 `qwen-plus`，`GENERATION_MODEL` 可改；也支持 GPT-4o 等） |
 | 交互界面 | Streamlit |
@@ -57,8 +57,8 @@
     ├── parsed_reports_merging.py  # 解析结果规整为页文本
     ├── pdf_page_map.py        # Markdown 行 -> 源 PDF 真实页码的对齐
     ├── text_splitter.py       # 文本分块（页边界内切分，产出 chunks + pages）
-    ├── ingestion.py           # 构建 FAISS 向量库 / BM25 索引
-    ├── retrieval.py           # 向量检索 / BM25 检索 / 混合检索
+    ├── ingestion.py           # 构建 FAISS 向量库（BM25Ingestor 已实现，未启用）
+    ├── retrieval.py           # 向量检索 + LLM 重排 + 父文档回溯（BM25Retriever 未接入）
     ├── reranking.py           # 检索结果重排序（LLM / Jina）
     ├── questions_processing.py # 问答主逻辑（检索、RAG 上下文、生成、引用校验）
     ├── citation_resolver.py   # 引文 -> 页码解析
