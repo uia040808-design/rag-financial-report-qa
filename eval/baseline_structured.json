@@ -1,0 +1,11 @@
+{
+  "count": 4,
+  "recovered": 4,
+  "rate": 1.0,
+  "should_pass_total": 10,
+  "should_pass_ok": 10,
+  "should_pass_rate": 1.0,
+  "should_fail_total": 4,
+  "should_fail_rejected": 4,
+  "false_accept_rate": 0.0
+}
