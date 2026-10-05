@@ -1,17 +1,19 @@
 """命令行入口。
 
-修复了三个会让 README 里的命令直接崩溃的问题：
+这里原本还有三个坏子命令，现已删除而不是修好，原因是它们服务的代码路径本身
+就是死代码：
 
 1. ``parse-pdfs`` 读取 ``paths.parsed_reports_path`` / ``parsed_reports_debug_path``，
-   而这两个属性在 PipelineConfig 里是注释掉的 —— AttributeError。
-   更根本的是：Docling 链路早已不在主流程上（主流程是 MinerU 转 markdown），
-   所以这个命令改成直接调 ``export_reports_to_markdown``。
+   而这两个属性在 PipelineConfig 里是注释掉的 —— AttributeError。更根本的是：
+   Docling 链路早已不在主流程上（主流程是 MinerU 转 markdown），所以该命令早已
+   改成直接调 ``export_reports_to_markdown``，真正入口是下面的 ``parse-pdfs``。
 2. ``serialize-tables`` 调用 ``pipeline.serialize_tables()`` —— 该方法不存在。
-   表格序列化依赖 Docling 解析产物，与当前 MinerU 链路不兼容，改为明确报错
-   并说明原因，而不是抛 AttributeError。
-3. ``process-questions --config`` 声明了 9 个选项，``configs`` 只有 3 个，
-   其余 6 个会 KeyError。改为从 ``configs`` 动态生成选项列表，
-   保证声明与实现永远一致。
+   表格序列化依赖 Docling 解析产物，与 MinerU 链路不兼容。相关的
+   ``src/tables_serialization.py``（TableSerializer，从未实例化）已删除。
+3. ``download-models`` 为 Docling 下载模型。该解析链路已整体删除，故无对象可下载。
+
+``process-questions --config`` 的选项集合由 ``configs`` 字典**动态生成**，
+避免声明与实现不一致。
 """
 
 import click
@@ -39,13 +41,6 @@ def _resolve_data_dir(explicit: str) -> Path:
 def cli():
     """Pipeline command line interface for processing PDF reports and questions."""
     pass
-
-
-@cli.command()
-def download_models():
-    """Download required docling models."""
-    click.echo("Downloading docling models...")
-    Pipeline.download_docling_models()
 
 
 @cli.command()
@@ -78,16 +73,6 @@ def parse_pdfs(data_dir, api, only, force):
     else:
         click.echo("使用标准 v4 API（需 MinerU 账号配额）")
         pipeline.export_reports_to_markdown(only=[only] if only else None, force=force)
-
-
-@cli.command()
-def serialize_tables():
-    """表格序列化（当前不可用）。"""
-    raise click.ClickException(
-        "表格序列化依赖 Docling 的解析产物（parsed reports JSON），"
-        "而当前主流程是 MinerU 直接转 Markdown，不产出该中间格式，因此无法使用。\n"
-        "如需该能力，需要先恢复 Docling 解析链路并保留其 JSON 产物。"
-    )
 
 
 @cli.command()

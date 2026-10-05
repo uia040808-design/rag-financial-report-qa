@@ -10,10 +10,9 @@
 
 ## 功能特性
 
-- **PDF 智能解析**：MinerU 转 Markdown（默认走 Agent 免 Token 接口）。Docling 解析代码保留但**不在主流程上** —— `Pipeline.parse_pdf_reports` 引用的 `parsed_reports_path` 属性在 `PipelineConfig` 里被注释掉，调用即 `AttributeError`；当前可用入口只有 MinerU
+- **PDF 智能解析**：MinerU 转 Markdown（默认走 Agent 免 Token 接口）
 - **语义向量检索**：基于 FAISS 向量库 + DashScope `qwen3.7-text-embedding-flash` 向量模型，支持中文语义检索
 - **多文档检索**：同一公司的全部文档合并排序，而非按公司名路由到单个文档（见下文实测）
-- **关键词检索**：BM25 组件已实现（`BM25Ingestor` / `BM25Retriever`）但**未启用** —— 默认链路不建索引（`databases/` 下无 `bm25_dbs` 产物）、`BM25Retriever` 无任何调用方，且分词是 `str.split()`（对中文无效，需 jieba）。**不构成本系统当前能力**，实际检索是「向量检索 + LLM 重排 + 父文档检索」
 - **LLM 重排序**：用大模型对检索结果二次排序；模型返回的分数被真正解析与使用，解析失败时降级为纯向量排序
 - **父文档检索**：检索到相关文本块后，向上回溯返回完整页面内容，保留上下文
 - **思维链推理**：答案包含分步分析、推理摘要、引用原文、最终答案等结构化字段
@@ -30,12 +29,11 @@
 
 | 环节 | 技术 |
 | --- | --- |
-| PDF 解析 | MinerU（主流程）。Docling 保留但未接入，见「功能特性」 |
-| 文本分块 | 自研文本分割器，**按行**切分（30 行/块、5 行重叠），在页边界内切分保证块不跨页 —— 父文档回溯的前提。按 token 的 300/50 路径已实现，未启用 |
+| PDF 解析 | MinerU（默认 Agent 轻量接口，免 Token） |
+| 文本分块 | 自研文本分割器，**按行**切分（30 行/块、5 行重叠），在页边界内切分保证块不跨页 —— 父文档回溯的前提 |
 | 向量化 | 阿里云百炼 `qwen3.7-text-embedding-flash` |
 | 向量检索 | FAISS（余弦内积） |
-| 关键词检索 | BM25（rank-bm25）——已实现**未启用**，见「功能特性」 |
-| 重排序 | LLM 重排（默认 qwen）。`JinaReranker` 类已实现但**从未实例化**，未接入 |
+| 重排序 | LLM 重排（默认 qwen） |
 | 问答模型 | 通义千问（默认 `qwen-plus`，`GENERATION_MODEL` 可改；也支持 GPT-4o 等） |
 | 交互界面 | Streamlit |
 
@@ -52,21 +50,19 @@
 │   └── stock_data/            # 中芯国际数据目录（PDF 报告、问题集、元数据）
 ├── src/
 │   ├── pipeline.py            # 主流程调度（分块、建库、问答），内置多种配置
-│   ├── pdf_parsing.py         # Docling PDF 结构化解析
 │   ├── pdf_mineru.py          # MinerU PDF 转 Markdown
-│   ├── parsed_reports_merging.py  # 解析结果规整为页文本
 │   ├── pdf_page_map.py        # Markdown 行 -> 源 PDF 真实页码的对齐
 │   ├── text_splitter.py       # 文本分块（页边界内切分，产出 chunks + pages）
-│   ├── ingestion.py           # 构建 FAISS 向量库（BM25Ingestor 已实现，未启用）
-│   ├── retrieval.py           # 向量检索 + LLM 重排 + 父文档回溯（BM25Retriever 未接入）
-│   ├── reranking.py           # 检索结果 LLM 重排序（JinaReranker 已实现，未接入）
+│   ├── ingestion.py           # 构建 FAISS 向量库
+│   ├── retrieval.py           # 向量检索 + LLM 重排 + 父文档回溯
+│   ├── reranking.py           # 检索结果 LLM 重排序
 │   ├── questions_processing.py # 问答主逻辑（检索、RAG 上下文、生成、引用校验）
 │   ├── citation_resolver.py   # 引文 -> 页码解析
 │   ├── structured_output.py   # 结构化输出解析、校验与降级标记
 │   ├── prompts.py             # 所有提示词与结构化输出 Schema
-│   ├── tables_serialization.py # 表格序列化（TableSerializer 已实现，主流程未调用）
-│   ├── api_requests.py        # 大模型 API 调用封装
-│   └── api_request_parallel_processor.py  # 并发限流的批量 API 请求处理
+│   ├── api_requests.py        # 大模型 API 调用封装（DashScope / OpenAI）
+│   ├── dashscope_errors.py    # 百炼业务错误的分类与原样透出
+│   └── env_loader.py          # .env / env 加载与模型名解析
 └── eval/                      # 引用评测（标注集、评分脚本、回归门禁）
 ```
 
@@ -123,20 +119,15 @@ DASHSCOPE_API_KEY=sk-xxxxx
 # 因此不配置也能跑通 PDF -> Markdown。申请地址：https://mineru.net
 MINERU_API_KEY=sk-xxxxx
 
-# 可选：OpenAI 密钥，用于切换 GPT 系列模型
+# 可选：OpenAI 密钥，用于把问答与重排切到 GPT 系列模型
+# （`RunConfig.api_provider="openai"`；默认走 DashScope）
 OPENAI_API_KEY=sk-xxxxx
-
-# 可选：Gemini 密钥
-GEMINI_API_KEY=AIzaSxxxxx
-
-# 可选：Jina 重排密钥（JinaReranker 未接入主链路，配了暂不会被使用）
-JINA_API_KEY=jina_xxxxx
 ```
 
 > 注：只有 `DASHSCOPE_API_KEY` 是必填（向量化与问答）。
 > PDF 转 Markdown 走 MinerU 的 Agent 轻量 API，**免 Token**、仅按 IP 限频，
 > 所以 `MINERU_API_KEY` 只在你显式改用标准 API 时才需要。
-> 其余密钥仅在切换到对应模型时才需要。
+> `OPENAI_API_KEY` 仅在切换到 GPT 系列模型时才需要。
 >
 > ⚠️ **请勿把真实密钥提交到 Git。** `env` 文件已从 git 跟踪中移除
 > （`git rm --cached env`），并在 `.gitignore` 里同时覆盖了文件与目录两种形式
@@ -176,13 +167,9 @@ python -m src.pdf_mineru --api standard
 MinerU 产物除 `full.md` 外还会保存 `*.content_list.json`，其中带权威的
 `page_idx`，用于页码对齐的交叉校验。
 
-### 3. 下载 Docling 模型（可选，非必需）
-
-主流程走 MinerU，**不需要这一步**，可跳过。仅当你准备恢复已停用的 Docling 解析链路时才需要：
-
-```bash
-python main.py download_models
-```
+> 历史上还有一条 Docling 解析链路（含 `pdf_parsing.py`、`parsed_reports_merging.py`
+> 与 `main.py download_models`）。它产出的 JSON 中间格式是表格序列化的唯一输入，
+> 而表格序列化本身从未接入主流程，因此整条链路无可用入口，已整体删除。
 
 ## 快速开始
 
@@ -197,7 +184,7 @@ python -m src.pipeline
 ### 方式二：命令行分步运行
 
 ```bash
-# 1. 解析 PDF 报告（支持并行）
+# 1. 解析 PDF 报告（MinerU，支持 --only / --force / --api）
 python main.py parse-pdfs
 
 # 2. 处理报告：分块并构建向量数据库
@@ -213,7 +200,7 @@ python main.py process-questions --question "..." --kind number
 
 > `--config` 的可选值由 `configs` 字典**动态生成**，避免声明与实现不一致。
 > 注意 `process-reports` 与 `process-questions` 的选项集合不同：
-> 前者是预处理配置（`no_ser_tab` / `ser_tab`），后者是问答配置（`base` / `max` / `pdr`）。
+> 前者是预处理配置（当前只有 `no_ser_tab` 一档），后者是问答配置（`base` / `max` / `pdr`）。
 
 ### 方式三：Streamlit Web 界面
 
@@ -235,7 +222,10 @@ streamlit run app_streamlit.py
 | `pdr` | 启用父文档检索 |
 | `max` | 推荐最佳配置：多文档向量检索 + 父文档检索 + LLM 重排 |
 
-另有预处理配置 `ser_tab` / `no_ser_tab`。⚠️ **当前 `ser_tab` 是空转的**：它只把输出目录改名为 `databases_ser_tab`，`process_parsed_reports()` 并不读 `use_serialized_tables`，分块与建库逻辑完全相同 —— `TableSerializer` 已导入但从未实例化，`main.py serialize-tables` 命令则直接报错。不建议使用。
+预处理侧（`process-reports --config`）目前只有 `no_ser_tab` 一档。原先还有
+`ser_tab`，但它只把输出目录改名为 `databases_ser_tab`，`process_parsed_reports()`
+并不读 `use_serialized_tables`，两档的分块与建库逻辑完全相同 —— 等于给同一份
+产物准备了两个目录名。它依赖的表格序列化链路已删除，该档随之移除。
 
 ### 模型配置
 
