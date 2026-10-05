@@ -229,8 +229,7 @@ def cross_check_with_content_list(
     if not blocks:
         return None
 
-    with open(md_path, encoding="utf-8") as handle:
-        lines = handle.read().split("\n")
+    lines = read_markdown_lines(md_path)
     line_norm = [normalize(l) for l in lines]
 
     # 按页收集锚串（取该页最长的一条正文）
@@ -289,6 +288,39 @@ def cross_check_with_content_list(
     }
 
 
+def read_markdown_lines(md_path: Path) -> List[str]:
+    """按行读取 markdown —— **"第 N 行"口径的唯一权威来源**。
+
+    为什么必须是单一入口
+    ------------------
+    本项目的下游有三处按"行"索引同一个文件，且必须对"第 N 行"给出完全一致的
+    定义：页码对齐产出的 ``line_pages``、分块的 ``split_markdown_file``、父文档
+    聚合的 ``build_pages``（直接用 ``line_pages`` 的下标去取 ``lines[index]``）。
+    口径一旦差 1，引用页码会整体错位 —— 而且是**静默**错位。
+
+    历史上这里出过一次真实故障：``align_markdown_to_pages`` 用
+    ``read().split("\\n")``，而 ``split_markdown_file`` 用 ``readlines()``。
+    前者在文件以换行结尾时会多出一个**尾部空元素**，后者不会，于是长度校验
+    直接报 ``line_pages 长度(1262)与 markdown 行数(1261)不一致``，
+    ``chunk_reports`` 整个阶段失败。触发条件不是"文件末尾有换行"这么简单：
+    Python 文本模式的 universal newlines 会把 ``\\r\\n`` 与**孤立 ``\\r``**
+    都归一为 ``\\n``，所以只要最后一个字符是换行类字节就会差 1。而文本文件
+    以换行结尾是通行惯例 —— 按 MinerU 的正常产出，9 份文档**全部**会触发。
+
+    为什么不用 ``splitlines()``
+    ------------------------
+    ``splitlines()`` 确实也不会产生尾部空元素，看似等价，但它额外会在
+    ``\\x0c``（form feed）、``\\x0b``、``\\x1c``、``\\u2028`` 等 Unicode 行界符处
+    切分，而文本模式的 ``readlines()`` **不会**。PDF 抽取文本里出现 form feed
+    很常见，用 ``splitlines()`` 等于把这个 bug 换成一个更隐蔽的版本。
+
+    因此统一使用 ``readlines()``：它的语义与 ``split_markdown_file`` /
+    ``build_pages`` 原本的行为**逐字节一致**，修复只消除分歧、不改变分块结果。
+    """
+    with open(md_path, "r", encoding="utf-8") as handle:
+        return handle.readlines()
+
+
 def align_markdown_to_pages(
     md_path: Path, pdf_path: Optional[Path]
 ) -> Tuple[List[Optional[int]], Dict[str, object]]:
@@ -305,9 +337,9 @@ def align_markdown_to_pages(
     ----
     ``(line_pages, report)``；``line_pages`` 与 markdown 行一一对应。
     """
-    with open(md_path, encoding="utf-8") as handle:
-        text = handle.read()
-    lines = text.split("\n")
+    # 行口径必须与 split_markdown_file / build_pages 完全一致，否则长度校验
+    # 会报"不一致"，或下标越界。见 read_markdown_lines 的说明。
+    lines = read_markdown_lines(md_path)
 
     if pdf_path is None or not Path(pdf_path).exists():
         _log.warning("未找到源 PDF %s，跳过页码对齐（引用将不可用）", pdf_path)

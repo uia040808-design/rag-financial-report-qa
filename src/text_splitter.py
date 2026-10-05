@@ -4,7 +4,11 @@ from typing import Dict, List, Optional, Tuple
 import pandas as pd
 import os
 
-from src.pdf_page_map import align_markdown_to_pages, resolve_pdf_for_markdown
+from src.pdf_page_map import (
+    align_markdown_to_pages,
+    read_markdown_lines,
+    resolve_pdf_for_markdown,
+)
 
 # 文本分块工具：按**行**在页边界内切分，产出 chunks（供向量检索）+ pages（供父文档回溯）
 #
@@ -30,8 +34,7 @@ class TextSplitter():
             为 None 时退化为"无页码"模式（引用将不可用，日志会明确告警）
         :return: 分块列表
         """
-        with open(md_path, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
+        lines = read_markdown_lines(md_path)
 
         if line_pages is not None and len(line_pages) != len(lines):
             raise ValueError(
@@ -77,8 +80,7 @@ class TextSplitter():
         if line_pages is None:
             return []
 
-        with open(md_path, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
+        lines = read_markdown_lines(md_path)
 
         buckets: Dict[int, List[str]] = {}
         for index, page in enumerate(line_pages):
