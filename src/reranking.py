@@ -2,9 +2,7 @@ import os
 import re
 from typing import List, Optional
 
-from dotenv import load_dotenv
 from openai import OpenAI
-import requests
 import src.prompts as prompts
 from concurrent.futures import ThreadPoolExecutor
 from src.env_loader import load_project_env, generation_model
@@ -15,34 +13,6 @@ from src.dashscope_errors import (
 )
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
-
-# JinaReranker：基于Jina API的重排器，适用于多语言场景
-class JinaReranker:
-    def __init__(self):
-        # 初始化Jina重排API地址和请求头
-        self.url = 'https://api.jina.ai/v1/rerank'
-        self.headers = self.get_headers()
-        
-    def get_headers(self):
-        # 加载Jina API密钥，组装请求头
-        load_project_env()
-        jina_api_key = os.getenv("JINA_API_KEY")    
-        headers = {'Content-Type': 'application/json',
-                   'Authorization': f'Bearer {jina_api_key}'}
-        return headers
-    
-    def rerank(self, query, documents, top_n = 10):
-        # 调用Jina API进行重排，返回top_n相关文档
-        data = {
-            "model": "jina-reranker-v2-base-multilingual",
-            "query": query,
-            "top_n": top_n,
-            "documents": documents
-        }
-
-        response = requests.post(url=self.url, headers=self.headers, json=data)
-
-        return response.json()
 
 # LLMReranker：基于大模型的重排器，支持单条和批量重排
 # 优先匹配小数（0.85 / .9 / 1.0），再考虑独立的整数 0 或 1

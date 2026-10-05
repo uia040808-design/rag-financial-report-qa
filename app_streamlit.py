@@ -1,7 +1,6 @@
 import streamlit as st
 from pathlib import Path
 from src.pipeline import Pipeline, max_config
-from src.questions_processing import QuestionsProcessor
 from src.env_loader import generation_model
 import json
 

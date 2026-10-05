@@ -1,15 +1,10 @@
 import os
 import json
-import pickle
 import time
 from typing import List, Optional, Union
 from pathlib import Path
 from tqdm import tqdm
-import hashlib
 
-from dotenv import load_dotenv
-from openai import OpenAI
-from rank_bm25 import BM25Okapi
 import faiss
 import numpy as np
 from tenacity import (retry, wait_fixed, stop_after_attempt,
@@ -18,43 +13,6 @@ import dashscope
 from dashscope import TextEmbedding
 
 from src.env_loader import load_project_env, require_env
-
-# BM25Ingestor：BM25索引构建与保存工具
-class BM25Ingestor:
-    def __init__(self):
-        pass
-
-    def create_bm25_index(self, chunks: List[str]) -> BM25Okapi:
-        """从文本块列表创建BM25索引"""
-        tokenized_chunks = [chunk.split() for chunk in chunks]
-        return BM25Okapi(tokenized_chunks)
-    
-    def process_reports(self, all_reports_dir: Path, output_dir: Path):
-        """
-        批量处理所有报告，生成并保存BM25索引。
-        参数：
-            all_reports_dir (Path): 存放JSON报告的目录
-            output_dir (Path): 保存BM25索引的目录
-        """
-        output_dir.mkdir(parents=True, exist_ok=True)
-        all_report_paths = list(all_reports_dir.glob("*.json"))
-
-        for report_path in tqdm(all_report_paths, desc="Processing reports for BM25"):
-            # 加载报告
-            with open(report_path, 'r', encoding='utf-8') as f:
-                report_data = json.load(f)
-                
-            # 提取文本块并创建BM25索引
-            text_chunks = [chunk['text'] for chunk in report_data['content']['chunks']]
-            bm25_index = self.create_bm25_index(text_chunks)
-            
-            # 保存BM25索引，文件名用sha1_name
-            sha1_name = report_data["metainfo"]["sha1"]
-            output_file = output_dir / f"{sha1_name}.pkl"
-            with open(output_file, 'wb') as f:
-                pickle.dump(bm25_index, f)
-                
-        print(f"Processed {len(all_report_paths)} reports")
 
 # VectorDBIngestor：向量库构建与保存工具
 DEFAULT_EMBEDDING_MODEL = "qwen3.7-text-embedding-flash"

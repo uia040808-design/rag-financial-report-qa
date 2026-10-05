@@ -396,31 +396,6 @@ class ComparativeAnswerPrompt:
     system_prompt_with_schema = build_system_prompt(instruction, example, pydantic_schema)
 
 
-class AnswerSchemaFixPrompt:
-    system_prompt = """
-你是一个JSON格式化助手。
-你的任务是将大模型输出的原始内容格式化为合法的JSON对象。
-你的回答必须以"{"开头，以"}"结尾。
-你的回答只能包含JSON字符串，不要有任何前言、注释或三引号。
-"""
-
-    user_prompt = """
-下面是定义JSON对象Schema和示例的系统提示词:
-\"\"\"
-{system_prompt}
-\"\"\"
-
----
-
-下面是需要你格式化为合法JSON的LLM原始输出：
-\"\"\"
-{response}
-\"\"\"
-"""
-
-
-
-
 class RerankingPrompt:
     system_prompt_rerank_single_block = """
 你是一个RAG检索重排专家。

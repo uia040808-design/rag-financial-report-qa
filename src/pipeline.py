@@ -2,29 +2,33 @@
 from dataclasses import dataclass
 from pathlib import Path
 from pyprojroot import here
-import logging
-import os
 import json
 import pandas as pd
-import shutil
 import time
 
-from src.pdf_parsing import PDFParser
 from src import pdf_mineru
-from src.parsed_reports_merging import PageTextPreparation
 from src.text_splitter import TextSplitter
 from src.ingestion import VectorDBIngestor
-from src.ingestion import BM25Ingestor
 from src.questions_processing import QuestionsProcessor
-from src.tables_serialization import TableSerializer
 from typing import Optional
 
-@dataclass
 class PipelineConfig:
-    def __init__(self, root_path: Path, subset_name: str = "subset.csv", questions_file_name: str = "questions.json", pdf_reports_dir_name: str = "pdf_reports", serialized: bool = False, config_suffix: str = ""):
+    """路径配置。
+
+    这两个配置类都**不是** dataclass：字段全部在 ``__init__`` 里赋值、没有类级
+    注解，因此 ``@dataclass`` 不会生成 ``__init__``（手写的那个会被保留），它唯一
+    的作用是把 ``__repr__`` 换成一个字段为空的空壳。历史版本挂过该装饰器，
+    现已移除以免让人误以为字段是声明式的。
+
+    历史版本还带 ``serialized`` 参数，用于把输出目录改名为 ``databases_ser_tab``。
+    它依赖 Docling 的表格序列化产物，而那条链路早已不在主流程上，
+    ``process_parsed_reports()`` 也从不读它 —— 只会让两套完全相同的分块产物
+    落到不同目录。现已连同 ``use_serialized_tables`` 一并删除。
+    """
+
+    def __init__(self, root_path: Path, subset_name: str = "subset.csv", questions_file_name: str = "questions.json", pdf_reports_dir_name: str = "pdf_reports", config_suffix: str = ""):
         # 路径配置，支持不同流程和数据目录
         self.root_path = root_path
-        suffix = "_ser_tab" if serialized else ""
 
         self.subset_path = root_path / subset_name
         self.questions_file_path = root_path / questions_file_name
@@ -32,29 +36,20 @@ class PipelineConfig:
         
         self.answers_file_path = root_path / f"answers{config_suffix}.json"       
         self.debug_data_path = root_path / "debug_data"
-        self.databases_path = root_path / f"databases{suffix}"
-        
+        self.databases_path = root_path / "databases"
+
         self.vector_db_dir = self.databases_path / "vector_dbs"
         self.documents_dir = self.databases_path / "chunked_reports"
-        self.bm25_db_path = self.databases_path / "bm25_dbs"
 
-        # self.parsed_reports_dirname = "01_parsed_reports"
-        # self.parsed_reports_debug_dirname = "01_parsed_reports_debug"
-        # self.merged_reports_dirname = f"02_merged_reports{suffix}"
-        self.reports_markdown_dirname = f"03_reports_markdown{suffix}"
-
-        #self.parsed_reports_path = self.debug_data_path / self.parsed_reports_dirname
-        #self.parsed_reports_debug_path = self.debug_data_path / self.parsed_reports_debug_dirname
-        #self.merged_reports_path = self.debug_data_path / self.merged_reports_dirname
+        self.reports_markdown_dirname = "03_reports_markdown"
         self.reports_markdown_path = self.debug_data_path / self.reports_markdown_dirname
 
 @dataclass
 class RunConfig:
+    """运行流程参数配置。"""
+
     # 运行流程参数配置
-    use_serialized_tables: bool = False
     parent_document_retrieval: bool = False
-    use_vector_dbs: bool = True
-    use_bm25_db: bool = False
     llm_reranking: bool = False
     llm_reranking_sample_size: int = 30
     top_n_retrieval: int = 10
@@ -62,7 +57,7 @@ class RunConfig:
     pipeline_details: str = ""
     submission_file: bool = True
     full_context: bool = False
-    api_provider: str = "dashscope" #openai
+    api_provider: str = "dashscope" # openai
     # None 表示"用项目默认的生成模型"（见 env_loader.generation_model），
     # 这样换模型只需改 GENERATION_MODEL 环境变量，不必改这里的默认值。
     answering_model: Optional[str] = None  # gpt-4o-mini-2024-07-18 or "gpt-4o-2024-08-06"
@@ -82,7 +77,6 @@ class Pipeline:
             subset_name=subset_name,
             questions_file_name=questions_file_name,
             pdf_reports_dir_name=pdf_reports_dir_name,
-            serialized=self.run_config.use_serialized_tables,
             config_suffix=self.run_config.config_suffix
         )
 
@@ -104,36 +98,6 @@ class Pipeline:
                 
             except Exception as e:
                 print(f"Error converting JSON to CSV: {str(e)}")
-
-    @staticmethod
-    def download_docling_models(): 
-        # 下载Docling所需模型，避免首次运行时自动下载
-        logging.basicConfig(level=logging.DEBUG)
-        parser = PDFParser(output_dir=here())
-        parser.parse_and_export(input_doc_paths=[here() / "src/dummy_report.pdf"])
-
-    def parse_pdf_reports_parallel(self, chunk_size: int = 2, max_workers: int = 10):
-        """多进程并行解析PDF报告，提升处理效率
-        参数：
-            chunk_size: 每个worker处理的PDF数
-            num_workers: 并发worker数
-        """
-        logging.basicConfig(level=logging.DEBUG)
-        
-        pdf_parser = PDFParser(
-            output_dir=self.paths.parsed_reports_path,
-            csv_metadata_path=self.paths.subset_path
-        )
-        pdf_parser.debug_data_path = self.paths.parsed_reports_debug_path
-
-        input_doc_paths = list(self.paths.pdf_reports_dir.glob("*.pdf"))
-        
-        pdf_parser.parse_and_export_parallel(
-            input_doc_paths=input_doc_paths,
-            optimal_workers=max_workers,
-            chunk_size=chunk_size
-        )
-        print(f"PDF reports parsed and saved to {self.paths.parsed_reports_path}")
 
     def export_reports_to_markdown(self, only=None, force=False):
         """
@@ -192,20 +156,6 @@ class Pipeline:
         vdb_ingestor.process_reports(input_dir, output_dir)
         print(f"Vector databases created in {output_dir}")
     
-    def create_bm25_db(self):
-        """从分块报告创建BM25数据库"""
-        input_dir = self.paths.documents_dir
-        output_file = self.paths.bm25_db_path
-        
-        bm25_ingestor = BM25Ingestor()
-        bm25_ingestor.process_reports(input_dir, output_file)
-        print(f"BM25 database created at {output_file}")
-    
-    def parse_pdf_reports(self, parallel: bool = True, chunk_size: int = 2, max_workers: int = 10):
-        # 解析PDF报告，支持并行处理
-        if parallel:
-            self.parse_pdf_reports_parallel(chunk_size=chunk_size, max_workers=max_workers)
-
     def process_parsed_reports(self):
         """
         处理已解析的PDF报告，主要流程：
@@ -301,8 +251,12 @@ class Pipeline:
         print(f"[计时] answer_single_question 总耗时: {t2-t0:.2f} 秒")
         return answer
 
-preprocess_configs = {"ser_tab": RunConfig(use_serialized_tables=True),
-                      "no_ser_tab": RunConfig(use_serialized_tables=False)}
+# 预处理（分块 + 建库）目前只有一种有效配置。原先还有 `ser_tab` 一档，
+# 但它只把输出目录改名为 `databases_ser_tab`，而 `process_parsed_reports()`
+# 从不读 `use_serialized_tables` —— 两档的分块与建库逻辑完全相同，
+# 等于给同一份产物准备了两个目录名。表格序列化所依赖的 Docling 链路删除后，
+# 该字段已无任何读取方，故一并移除。
+preprocess_configs = {"no_ser_tab": RunConfig()}
 
 # answering_model 留空 -> 由 env_loader.generation_model() 决定（可用
 # GENERATION_MODEL 环境变量覆盖）。原先三处都硬编码 "qwen-turbo"，换模型要改
@@ -322,9 +276,8 @@ parent_document_retrieval_config = RunConfig(
     config_suffix="_pdr"
 )
 
-## 这里
+## 推荐配置：多文档检索 + 父文档检索 + LLM 重排
 max_config = RunConfig(
-    use_serialized_tables=False,
     parent_document_retrieval=True,
     llm_reranking=True,
     parallel_requests=4,

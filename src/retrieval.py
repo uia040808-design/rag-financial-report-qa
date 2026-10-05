@@ -1,201 +1,52 @@
 import json
 import logging
-from typing import List, Tuple, Dict, Union, Optional
-from rank_bm25 import BM25Okapi
-import pickle
+from typing import List, Dict
 from pathlib import Path
 import faiss
-from openai import OpenAI
-from dotenv import load_dotenv
-import os
+import time
 import numpy as np
 from src.reranking import LLMReranker
-import hashlib
-import pandas as pd
-import time
-from src.env_loader import load_project_env
 
 _log = logging.getLogger(__name__)
 
-class BM25Retriever:
-    def __init__(self, bm25_db_dir: Path, documents_dir: Path):
-        # 初始化BM25检索器，指定BM25索引和文档目录
-        self.bm25_db_dir = bm25_db_dir
-        self.documents_dir = documents_dir
-
-    def _reports_for_company(self, company_name: str) -> List[Tuple[Path, Dict]]:
-        """返回该公司的**全部**分块报告（多文档检索的入口）。
-
-        历史实现在首个命中后 ``break``，因此一家公司只会被检索到任意一份报告。
-        本项目语料里 9 份文档的 ``company_name`` 全是"中芯国际"（年报、深度报告、
-        调研纪要、盈利预测……），所以"首个命中"完全取决于目录遍历顺序 ——
-        检索质量成了偶然结果，且另外 8 份文档形同不存在。
-        """
-        hits: List[Tuple[Path, Dict]] = []
-        for path in sorted(self.documents_dir.glob("*.json")):
-            try:
-                with open(path, 'r', encoding='utf-8') as f:
-                    doc = json.load(f)
-            except Exception as e:  # noqa: BLE001 - 单份报告损坏不应让整次检索失败
-                _log.error(f"Error loading JSON from {path.name}: {e}")
-                continue
-            metainfo = doc.get("metainfo", {}) or {}
-            if metainfo.get("company_name") == company_name or company_name in metainfo.get("file_name", ""):
-                hits.append((path, doc))
-        return hits
-
-    def retrieve_by_company_name(self, company_name: str, query: str, top_n: int = 3, return_parent_pages: bool = False) -> List[Dict]:
-        """跨该公司**全部**文档检索，按分数合并后返回全局 top_n。
-
-        BM25 分数的绝对值依赖语料统计（idf 与文档平均长度），不同文档之间
-        严格说不可比。但同一份分块报告集合由同一套 ``.split()`` 分词产生，
-        量级差异远小于文档间的相关性差异，因此这里直接按分数合并；
-        合并结果里保留 ``pdf_sha1`` 以便区分同号页码。
-        """
-        hits = self._reports_for_company(company_name)
-        if not hits:
-            raise ValueError(f"No report found with '{company_name}' company name.")
-
-        tokenized_query = query.split()
-        pooled: List[Dict] = []
-
-        for path, document in hits:
-            sha1 = document.get("metainfo", {}).get("sha1")
-            if not sha1:
-                _log.warning(f"报告 {path.name} 缺少 sha1，跳过")
-                continue
-            bm25_path = self.bm25_db_dir / f"{sha1}.pkl"
-            if not bm25_path.exists():
-                _log.warning(f"缺少 BM25 索引 {bm25_path.name}，跳过 {path.name}")
-                continue
-            with open(bm25_path, 'rb') as f:
-                bm25_index = pickle.load(f)
-
-            chunks = document["content"]["chunks"]
-            pages = document["content"].get("pages", []) or []
-            scores = bm25_index.get_scores(tokenized_query)
-
-            # 每份文档先取 top_n，够用即可：全局 top_n 不会来自某文档的第 n+1 名
-            for index in sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:top_n]:
-                chunk = chunks[index]
-                pooled.append({
-                    "distance": round(float(scores[index]), 4),
-                    "page": chunk["page"],
-                    "text": chunk["text"],
-                    "pdf_sha1": sha1,
-                    "file_name": document.get("metainfo", {}).get("file_name", path.name),
-                    "_chunk_page": chunk["page"],
-                    "_pages": pages,
-                })
-
-        pooled.sort(key=lambda r: r["distance"], reverse=True)
-
-        retrieval_results: List[Dict] = []
-        seen: set = set()
-        for row in pooled:
-            page = row["page"]
-            if return_parent_pages:
-                parent = next((p for p in row["_pages"] if p["page"] == page), None)
-                if parent is None:
-                    continue
-                key = (row["pdf_sha1"], parent["page"])
-                if key in seen:
-                    continue
-                seen.add(key)
-                retrieval_results.append({
-                    "distance": row["distance"],
-                    "page": parent["page"],
-                    "text": parent["text"],
-                    "pdf_sha1": row["pdf_sha1"],
-                    "file_name": row["file_name"],
-                })
-            else:
-                key = (row["pdf_sha1"], page)
-                if key in seen:
-                    continue
-                seen.add(key)
-                retrieval_results.append({
-                    "distance": row["distance"],
-                    "page": page,
-                    "text": row["text"],
-                    "pdf_sha1": row["pdf_sha1"],
-                    "file_name": row["file_name"],
-                })
-            if len(retrieval_results) >= top_n:
-                break
-        return retrieval_results
-
-
 
 class VectorRetriever:
-    def __init__(self, vector_db_dir: Path, documents_dir: Path, embedding_provider: str = "dashscope"):
+    def __init__(self, vector_db_dir: Path, documents_dir: Path):
         # 初始化向量检索器，加载所有向量库和文档
         self.vector_db_dir = vector_db_dir
         self.documents_dir = documents_dir
         self.all_dbs = self._load_dbs()
-        # 默认使用 dashscope 作为 embedding provider
-        self.embedding_provider = embedding_provider.lower()
-        self.llm = self._set_up_llm()
-
-    def _set_up_llm(self):
-        # 根据 embedding_provider 初始化对应的 LLM 客户端
-        load_project_env()
-        if self.embedding_provider == "openai":
-            llm = OpenAI(
-                api_key=os.getenv("OPENAI_API_KEY"),
-                timeout=None,
-                max_retries=2
-            )
-            return llm
-        elif self.embedding_provider == "dashscope":
-            import dashscope
-            dashscope.api_key = os.getenv("DASHSCOPE_API_KEY")
-            return None  # dashscope 不需要 client 对象
-        else:
-            raise ValueError(f"不支持的 embedding provider: {self.embedding_provider}")
 
     def _get_embedding(self, text: str):
-        # 根据 embedding_provider 获取文本的向量表示
-        if self.embedding_provider == "openai":
-            embedding = self.llm.embeddings.create(
-                input=text,
-                model="text-embedding-3-large"
-            )
-            return embedding.data[0].embedding
-        elif self.embedding_provider == "dashscope":
-            import dashscope
-            from src.ingestion import embedding_model
-            rsp = dashscope.TextEmbedding.call(
-                model=embedding_model(),   # 必须与建库时同一个模型
-                input=[text]
-            )
-            # 兼容 dashscope 返回格式，不能用 resp.output，需用 resp['output']
-            if 'output' in rsp and 'embeddings' in rsp['output']:
-                # 多条输入（本处只有一条）
-                emb = rsp['output']['embeddings'][0]
-                if emb['embedding'] is None or len(emb['embedding']) == 0:
-                    raise RuntimeError(f"DashScope返回的embedding为空，text_index={emb.get('text_index', None)}")
-                return emb['embedding']
-            elif 'output' in rsp and 'embedding' in rsp['output']:
-                # 兼容单条输入格式
-                if rsp['output']['embedding'] is None or len(rsp['output']['embedding']) == 0:
-                    raise RuntimeError("DashScope返回的embedding为空")
-                return rsp['output']['embedding']
-            else:
-                raise RuntimeError(f"DashScope embedding API返回格式异常: {rsp}")
-        else:
-            raise ValueError(f"不支持的 embedding provider: {self.embedding_provider}")
+        """取查询文本的向量表示。
 
-    @staticmethod
-    def set_up_llm():
-        # 静态方法，初始化OpenAI LLM
-        load_project_env()
-        llm = OpenAI(
-            api_key=os.getenv("OPENAI_API_KEY"),
-            timeout=None,
-            max_retries=2
+        原本这里还有一个 ``embedding_provider="openai"`` 分支，走
+        ``text-embedding-3-large``。它只能由外部直接传
+        ``VectorRetriever(embedding_provider=...)`` 才会生效 —— 全项目的调用方
+        （``questions_processing`` / ``HybridRetriever``）都没有传，因此是不可达
+        分支，已删除。切换 embedding 后端请改
+        :func:`src.ingestion.embedding_model`，并**重建向量库**。
+        """
+        import dashscope
+        from src.ingestion import embedding_model
+        rsp = dashscope.TextEmbedding.call(
+            model=embedding_model(),   # 必须与建库时同一个模型
+            input=[text]
         )
-        return llm
+        # 兼容 dashscope 返回格式，不能用 resp.output，需用 resp['output']
+        if 'output' in rsp and 'embeddings' in rsp['output']:
+            # 多条输入（本处只有一条）
+            emb = rsp['output']['embeddings'][0]
+            if emb['embedding'] is None or len(emb['embedding']) == 0:
+                raise RuntimeError(f"DashScope返回的embedding为空，text_index={emb.get('text_index', None)}")
+            return emb['embedding']
+        elif 'output' in rsp and 'embedding' in rsp['output']:
+            # 兼容单条输入格式
+            if rsp['output']['embedding'] is None or len(rsp['output']['embedding']) == 0:
+                raise RuntimeError("DashScope返回的embedding为空")
+            return rsp['output']['embedding']
+        else:
+            raise RuntimeError(f"DashScope embedding API返回格式异常: {rsp}")
 
     def _load_dbs(self):
         # 加载所有向量库和对应文档，建立映射
@@ -246,17 +97,6 @@ class VectorRetriever:
             }
             all_dbs.append(report)
         return all_dbs
-
-    @staticmethod
-    def get_strings_cosine_similarity(str1, str2):
-        # 计算两个字符串的余弦相似度（通过嵌入）
-        llm = VectorRetriever.set_up_llm()
-        embeddings = llm.embeddings.create(input=[str1, str2], model="text-embedding-3-large")
-        embedding1 = embeddings.data[0].embedding
-        embedding2 = embeddings.data[1].embedding
-        similarity_score = np.dot(embedding1, embedding2) / (np.linalg.norm(embedding1) * np.linalg.norm(embedding2))
-        similarity_score = round(similarity_score, 4)
-        return similarity_score
 
     def _reports_for_company(self, company_name: str) -> List[Dict]:
         """返回该公司的**全部**已加载报告。

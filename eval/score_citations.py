@@ -168,13 +168,6 @@ class Scorer:
             self._pooled_company = company
         return self._pooled
 
-    def pdf_text_for(self, ann) -> Optional[List[str]]:
-        key = ann["file_name"].replace(".md", "")
-        if key not in self.pdf_pages:
-            pdfs = list((ROOT / "pdf_reports").glob(f"{key}.pdf"))
-            self.pdf_pages[key] = [normalize(x) for x in extract_pdf_pages(pdfs[0])] if pdfs else None
-        return self.pdf_pages[key]
-
     def pdf_raw_for(self, ann) -> Optional[List[str]]:
         """PDF 原始逐页文本（未归一化），供回溯检查判断该页是否可作参考系。"""
         key = ann["file_name"].replace(".md", "")
